@@ -23,11 +23,12 @@ Il CSV ha un campione ogni --csv-stride passi (default 1 = 1 kHz; con 170 s sono
 """
 import argparse
 import csv
+import time
 from pathlib import Path
 import numpy as np
 
-import demo_panda as dp
-from admittance_control import AdmittanceParams, AdmittanceSim, StiffnessSchedule
+import panda_scene as ps
+from admittance_control import AdmittanceParams, AdmittanceSim, StiffnessSchedule, GOAL_DEPTH
 from breathing_profiles import PROFILES
 from tissue import Event
 from ft_sensor import CALIBRATIONS, NETFT_FILTERS
@@ -57,9 +58,7 @@ def make_params(a):
 
 
 def build_sim(a):
-    if a.goal_depth is not None:
-        dp.DEPTH = a.goal_depth
-    sim = AdmittanceSim(make_params(a), descent_time=a.descent_time, contact_model=a.contact_model,
+    sim = AdmittanceSim(make_params(a), descent_time=a.descent_time, goal_depth=a.goal_depth,
                         sensor=a.sensor, ati_calibration=a.ati_cal,
                         ati_filter=None if a.ati_filter == "none" else int(a.ati_filter))
     if a.sensor == "ati":
@@ -73,6 +72,34 @@ def build_sim(a):
     if a.breathing != "regular":
         sim.tissue.breathing = PROFILES[a.breathing]()
     return sim
+
+
+def run_viewer(sim, duration, vis_gain=1.0):
+    """Finestra MuJoCo interattiva: ~16 passi fisici (16 ms) per fotogramma, in tempo reale."""
+    import mujoco.viewer
+    m, d, ids = sim.model, sim.data, sim.ids
+    with mujoco.viewer.launch_passive(m, d) as v:
+        v.cam.azimuth, v.cam.elevation, v.cam.distance = 140, -25, 1.3
+        v.cam.lookat[:] = [0.0, 0.0, 0.15]
+        next_print = 0.0
+        while v.is_running() and d.time < duration:
+            t_wall = time.time()
+            for _ in range(16):
+                fn = sim.step()
+            # grafica: torso che respira, avvallamento sotto la sonda, colore della punta secondo la forza
+            comp = ps.measure_tissue_compression(m, d, ids, sim.tissue, d.time)
+            centre = d.geom_xpos[ids["tip_geom"]]
+            ps.update_tissue_mesh(m, sim.tissue, d.time, vis_gain, (centre[0], centre[1], comp) if comp > 0 else None)
+            green, red = abs(fn - sim.p.F_DES) <= 1.0, fn > 15.0
+            m.geom_rgba[ids["tip_geom"]] = (0.2, 0.8, 0.3, 1) if green else ((0.9, 0.2, 0.2, 1) if red else (0.95, 0.8, 0.2, 1))
+            v.update_hfield(ids["hfield"])
+            v.sync()
+            if d.time >= next_print:
+                L = sim.log
+                print(f"t={d.time:6.2f}s  F vera {fn:5.2f} N  F sensore {L['fmeas'][-1]:5.2f} N  "
+                      f"penetrazione {L['delta'][-1] * 1000:5.2f} mm  K_d {L['Kd'][-1]:6.0f} N/m  K_t {L['Kt'][-1]:5.0f} N/m")
+                next_print += 0.5
+            time.sleep(max(0.0, 0.016 - (time.time() - t_wall)))
 
 
 def plot_schedule(p, out):
@@ -133,7 +160,7 @@ def analyse_and_plot(sim, a, outdir):
                          scan_exy_medio_mm=1000 * L["exy"][scan].mean(), scan_exy_max_mm=1000 * L["exy"][scan].max(),
                          scan_completata_pct=100 * L["scan_s"][-1],
                          perdite_contatto_s=float(np.sum(L["fmeas"][win] < p.F_CONTACT_OK) / FS))
-    print(f"\n=== ammettenza | M_d {p.M_D} kg | F_des {p.F_DES} N | {p.INTEGRATOR} | K_t {p.KT_MODE} | contatto {sim.contact_model} ===")
+    print(f"\n=== ammettenza | M_d {p.M_D} kg | F_des {p.F_DES} N | {p.INTEGRATOR} | K_t {p.KT_MODE} ===")
     for k, v in stats.items():
         print(f"  {k:20s} {v:.3f}" if isinstance(v, float) else f"  {k:20s} {v}")
 
@@ -169,7 +196,6 @@ def analyse_and_plot(sim, a, outdir):
 
     # ------------------------------------------------------------------ percorso e mappe sul torace
     sub = slice(None, None, 20)                                  # un punto ogni 20 ms
-    sel = (np.arange(len(t))[sub])
     x_mm, y_mm = L["x"][sub] * 1000, L["y"][sub] * 1000
     fig, bx = plt.subplots(1, 3, figsize=(17, 5.8))
     pts = bx[0].scatter(x_mm, y_mm, c=t[sub], s=3, cmap="viridis")
@@ -205,7 +231,6 @@ if __name__ == "__main__":
     ap.add_argument("--viewer", action="store_true")
     ap.add_argument("--vis-gain", type=float, default=1.0)
     ap.add_argument("--plot-schedule", action="store_true")
-    ap.add_argument("--contact-model", choices=("hc", "native"), default="hc")
     ap.add_argument("--sensor", choices=("ati", "franka"), default="ati",
                     help="ati: Nano17 + Net F/T alla flangia (wrench MuJoCo); franka: vecchia stima F_ext scalare")
     ap.add_argument("--ati-cal", choices=sorted(CALIBRATIONS), default="SI-25-0.25", help="calibrazione Nano17")
@@ -214,7 +239,7 @@ if __name__ == "__main__":
     ap.add_argument("--breathing", choices=sorted(PROFILES), default="regular")
     ap.add_argument("--cough", type=float, default=11.0, help="istante di una tosse di prova [s]; -1 = nessuna")
     ap.add_argument("--descent-time", type=float, default=4.0)
-    ap.add_argument("--goal-depth", type=float, default=None, help="profondita' dell'obiettivo del planner [m]")
+    ap.add_argument("--goal-depth", type=float, default=GOAL_DEPTH, help="profondita' dell'obiettivo del planner [m]")
     ap.add_argument("--settle", type=float, default=3.0, help="secondi dopo il primo contatto prima delle statistiche")
     ap.add_argument("--csv-stride", type=int, default=1, help="un campione CSV ogni N passi (1 = 1 kHz)")
     for name in ("fdes", "M", "kfar", "knear", "dfar", "dnear", "doff"):
@@ -241,9 +266,8 @@ if __name__ == "__main__":
         a.duration = (a.descent_time + sim.p.SCAN_DELAY + sim.traj.T + 3.0) if sim.p.SCAN_ENABLE else 15.0
     print(f"durata simulazione: {a.duration:.1f} s")
     if a.viewer:
-        dp.run_viewer(sim, a.duration, a.vis_gain)
+        run_viewer(sim, a.duration, a.vis_gain)
     else:
-        import time
         t0 = time.time()
         while sim.data.time < a.duration:
             sim.step()

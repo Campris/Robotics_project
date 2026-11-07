@@ -20,13 +20,12 @@ CATENA DEI BLOCCHI (tutta a 1 kHz, un passo fisico = un aggiornamento):
 Convenzione di segno: v_in > 0 = la punta si muove VERSO la pelle (asse -n, con n normale uscente).
 L'errore di forza e' e_F = F_des_eff - F_meas: positivo = forza troppo bassa = il robot deve avanzare.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import numpy as np
 import mujoco
 
-import demo_panda as dp
 import panda_scene as ps
-from tissue import min_jerk
+from tissue import Tissue, ForceSensor, min_jerk, min_jerk_dot
 from ft_sensor import ATINanoSensor
 
 
@@ -249,7 +248,7 @@ class LineTrajectory:
         s = (self.clock - segment_start) / duration
         delta = self.waypoints[segment + 1] - self.waypoints[segment]
         xy = self.waypoints[segment] + delta * float(min_jerk(s))
-        ds_dt = (30 * s ** 2 - 60 * s ** 3 + 30 * s ** 4) / duration
+        ds_dt = float(min_jerk_dot(s)) / duration
         return xy, delta * ds_dt, self.clock / self.T
 
 
@@ -267,35 +266,58 @@ def differential_ik(J, v6, q, q_null, p: AdmittanceParams):
 # =====================================================================================================
 #  SIMULAZIONE CON IL CONTROLLO DI AMMETTENZA
 # =====================================================================================================
-class AdmittanceSim(dp.Sim):
+HOVER = 0.06          # quota di partenza sopra la pelle a riposo [m]
+GOAL_DEPTH = 0.008    # profondita' dell'obiettivo del planner sotto la pelle a riposo [m] (serve solo finche' K_d > 0)
+
+
+class AdmittanceSim:
     """
-    Come dp.Sim (tessuto, sensore, log, viewer) ma con la legge di controllo sostituita:
+    Panda in coppia + sonda + tessuto Hunt-Crossley + sensore F/T, con la legge di controllo:
     ammettenza ad integratore puro -> IK differenziale -> PD di posizione di giunto.
+    Ogni chiamata a step() e' un passo fisico da 1 ms; i segnali finiscono in self.log.
     """
 
-    def __init__(self, params: AdmittanceParams = None, contact_model="hc", sensor="ati",
-                 ati_calibration="SI-25-0.25", ati_filter=None, **kw):
-        if contact_model not in ("hc", "native"):
-            raise ValueError("contact_model deve essere 'hc' o 'native'")
+    def __init__(self, params: AdmittanceParams = None, sensor="ati", ati_calibration="SI-25-0.25",
+                 ati_filter=None, start_xy=(0.0, 0.0), descent_time=4.0, goal_depth=GOAL_DEPTH, seed=0):
         if sensor not in ("ati", "franka"):
             raise ValueError("sensor deve essere 'ati' (Nano17 al polso) o 'franka' (stima F_ext scalare)")
-        params = params or AdmittanceParams()
-        trajectory = LineTrajectory(params)
-        if params.SCAN_ENABLE:
-            dp.X0, dp.Y0 = trajectory.waypoints[0]               # la discesa avviene sul primo punto del percorso
-        super().__init__(contact_model=contact_model, **kw)     # il genitore prepara collisioni e corpo della sonda
-        self.p = params
-        self.traj = trajectory
+        if descent_time <= 0:
+            raise ValueError("descent_time deve essere positivo")
+        self.p = params or AdmittanceParams()
+        self.traj = LineTrajectory(self.p)
+        if self.p.SCAN_ENABLE:
+            start_xy = self.traj.waypoints[0]                   # la discesa avviene sul primo punto del percorso
+        self.x0, self.y0 = float(start_xy[0]), float(start_xy[1])
+        self.descent_time, self.goal_depth = float(descent_time), float(goal_depth)
+
+        # scena e tessuto
+        self.model, self.ids = ps.build_model()
+        self.data = mujoco.MjData(self.model)
+        m, d = self.model, self.data
+        self.dt = m.opt.timestep
+        self.tissue = Tissue()
+
+        # posa iniziale: sonda verticale HOVER sopra la pelle nel punto di partenza
+        mujoco.mj_resetDataKeyframe(m, d, 0)
+        q_home = d.qpos[:m.nv].copy()
+        self.R_des = np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1.0]])      # asse z della sonda verso il basso
+        self.z_rest = float(self.tissue.geom.z0(self.x0, self.y0))
+        err = ps.ik(m, d, self.ids["site"], np.array([self.x0, self.y0, self.z_rest + HOVER]), self.R_des, q_home)
+        print(f"IK errore residuo: {err:.2e}")
+        self.q_null = d.qpos[:m.nv].copy()                      # postura preferita per il nullspace
+        d.qvel[:] = 0
+        mujoco.mj_forward(m, d)
+
+        # controllore
         self.schedule = StiffnessSchedule(self.p)
         self.adm = PureIntegratorAdmittance(self.p.M_D, self.dt, self.p.INTEGRATOR)
-        m, d = self.model, self.data
         self.q_ref = d.qpos[:m.nv].copy()                       # riferimento di giunto (integrato da q_dot)
         self.kp_joint = np.array(self.p.KP_JOINT)
-        self._fn_prev = 0.0                                     # forza dell'istante precedente (solo contatto nativo)
 
         # Sensore di forza. "ati": Nano17 + Net F/T alla flangia, a partire dal wrench vero di MuJoCo.
         # "franka": vecchio modello scalare (LPF 80 Hz + 3 ms + 0.15 N) della stima F_ext del Panda.
         self.sensor_kind = sensor
+        self.sensor = ForceSensor(self.dt, seed=seed)
         self.ft = ATINanoSensor(self.dt, ati_calibration, ati_filter)
         # Tara ("Bias" del Net F/T) col robot fermo sopra la pelle: ctrl = compensazione di gravita' -> qacc = 0,
         # quindi il sensore vede solo il peso della sonda, che la tara toglie.
@@ -304,37 +326,32 @@ class AdmittanceSim(dp.Sim):
         self._ft_raw = d.sensordata[self.ids["ft_adr"]:self.ids["ft_adr"] + 6].copy()   # wrench vero (frame ft)
         self.ft.tare(self._ft_raw)
 
-        for k in ("Kd", "Bd", "Kt", "v_in", "dist", "Fdes_eff", "F_virt", "v_lim",
-                  "y", "x_ref", "y_ref", "z_ref", "scan_s", "exy", "ft_saturated"):
-            self.log[k] = []
-        dp.F_DES = self.p.F_DES                                 # colore della punta nel viewer
+        self.log = {k: [] for k in (
+            "t", "fn", "fmeas", "delta", "ncontact", "zs", "ztip", "x", "y", "tau", "ft_saturated",
+            "Kd", "Bd", "Kt", "v_in", "v_lim", "dist", "Fdes_eff", "F_virt",
+            "x_ref", "y_ref", "z_ref", "scan_s", "exy")}
+
+    def target(self, t):
+        """Obiettivo del planner: discesa min-jerk da HOVER sopra la pelle a goal_depth sotto, in descent_time."""
+        z0 = self.z_rest + HOVER
+        z1 = self.z_rest - self.goal_depth
+        return np.array([self.x0, self.y0, z0 + (z1 - z0) * min_jerk(t / self.descent_time)])
 
     def step(self):
         m, d, ids, p = self.model, self.data, self.ids, self.p
-        native = self.contact_model == "native"
         t, dt = d.time, self.dt
-        if native:
-            ps.update_tissue_mesh(m, self.tissue, t)
-            k_candidate, tc_candidate = self.configure_contact_stiffness()
-        mujoco.mj_step1(m, d)
+        mujoco.mj_step1(m, d)                                   # posizioni, Jacobiani, M, qfrc_bias al tempo t
 
         # ---------------------------------------------------------------- BLOCCO 0: misura
         pos = d.site_xpos[ids["site"]].copy()
         R = d.site_xmat[ids["site"]].reshape(3, 3)
-        compression = ps.measure_tissue_compression(m, d, ids, self.tissue, t)
-        J = dp.jac(m, d, ids["site"])
+        J = ps.jac(m, d, ids["site"])
         qd = d.qvel[:m.nv]
         v_tip = J @ qd
-        if not native:                                          # forza del tessuto (Hunt-Crossley) sulla punta
-            hc = self.tissue.contact(pos, v_tip[:3], t)
-            tau_hc = ps.apply_tip_force(m, d, self.body, hc.force, pos)   # xfrc_applied: la vede anche il sensore F/T
-            fn_true = hc.fn
-        else:
-            fn_true = self._fn_prev
-
-        n = self.tissue.normal(pos[0], pos[1], t)               # normale uscente della pelle sotto la punta
-        zs = self.tissue.surface_height(pos[0], pos[1], t)
-        dist = float((pos[2] - zs) * n[2])                      # distanza dalla pelle lungo n (>0 = sopra)
+        hc = self.tissue.contact(pos, v_tip[:3], t)             # forza del tessuto (Hunt-Crossley) sulla punta
+        ps.apply_tip_force(d, ids["probe_body"], hc.force, pos)  # xfrc_applied: la vede anche il sensore F/T
+        n = hc.normal                                           # normale uscente della pelle sotto la punta
+        dist = -hc.delta                                        # distanza dalla pelle lungo n (>0 = sopra)
 
         # UNICO segnale di forza visto dal controllore
         if self.sensor_kind == "ati":
@@ -344,7 +361,7 @@ class AdmittanceSim(dp.Sim):
             # il sensore misura la forza che la flangia esercita sulla sonda: dopo la tara vale -F_tessuto
             F_meas = float(-(R_ft @ w_meas[:3]) @ n)
         else:
-            F_meas = self.sensor.read(fn_true)
+            F_meas = self.sensor.read(hc.fn)
 
         # ---------------------------------------------------------------- BLOCCO 1: soglie di K_d
         K_d = self.schedule.K(dist, F_meas)
@@ -355,18 +372,18 @@ class AdmittanceSim(dp.Sim):
         K_t = tissue_stiffness(self.tissue, pos[0], pos[1], p.F_DES, p.KT_MODE)
         B_d = critical_damping(p.M_D, K_t + (K_d if p.B_INCLUDE_KD else 0.0), p.B_MIN)
 
-        # ---------------------------------------------------------------- BLOCCO 3: ammettenza + Eulero
-        goal = self.target(t)                                   # obiettivo del planner (serve solo finche' K_d > 0)
         # ---------------------------------------------------------------- BLOCCO 4a: traiettoria XY
+        goal = self.target(t)                                   # obiettivo del planner (serve solo finche' K_d > 0)
         if p.SCAN_ENABLE:
             xy_ref, v_ff_xy, scan_s = self.traj.update(t, dt, F_meas)
             goal[0], goal[1] = xy_ref                           # la quota z del planner resta quella della discesa
         else:
             v_ff_xy, scan_s = np.zeros(2), 0.0
+
+        # ---------------------------------------------------------------- BLOCCO 3: ammettenza + Eulero
         e_in = float((goal - pos) @ (-n))                       # distanza dall'obiettivo lungo l'asse verso la pelle
         F_virt = K_d * e_in                                     # forza virtuale della molla (0 a contatto)
         e_F = F_des_eff - F_meas                                # errore di forza
-        self.adm.M = p.M_D
         v_in = self.adm.step(F_virt + e_F, B_d)
         v_lim = self.schedule.v_in_max(dist, F_meas)
         v_in = self.adm.clamp(-p.V_RETRACT, v_lim)
@@ -374,11 +391,11 @@ class AdmittanceSim(dp.Sim):
         # ---------------------------------------------------------------- BLOCCO 4: velocita' cartesiana 6D
         # velocita' TANGENTE alla pelle: feedforward della linea + correzione P sull'errore in XY.
         # La componente z si ricava imponendo v_tan . n = 0, cosi' la sonda segue la curvatura del busto.
-        e_xy = np.array([goal[0] - pos[0], goal[1] - pos[1], 0.0])
-        v_xy = v_ff_xy + p.KP_POS_V * e_xy[:2]
+        e_xy = np.array([goal[0] - pos[0], goal[1] - pos[1]])
+        v_xy = v_ff_xy + p.KP_POS_V * e_xy
         v_tan = np.array([v_xy[0], v_xy[1], -(n[0] * v_xy[0] + n[1] * v_xy[1]) / n[2]])
         v_tan = v_tan * min(1.0, p.V_TAN_MAX / max(np.linalg.norm(v_tan), 1e-9))
-        w = np.clip(p.KP_ROT_V * dp.rot_err(R, self.R_des), -p.W_MAX, p.W_MAX)
+        w = np.clip(p.KP_ROT_V * ps.rot_err(R, self.R_des), -p.W_MAX, p.W_MAX)
         v6 = np.concatenate([-n * v_in + v_tan, w])
 
         # ---------------------------------------------------------------- BLOCCO 5: IK differenziale
@@ -388,46 +405,20 @@ class AdmittanceSim(dp.Sim):
         self.q_ref = q + np.clip(self.q_ref - q, -p.Q_REF_MAX_ERR, p.Q_REF_MAX_ERR)   # anti-windup
 
         # ---------------------------------------------------------------- BLOCCO 6: PD di posizione di giunto
-        Minv = np.zeros((m.nv, m.nv))
-        mujoco.mj_solveM(m, d, Minv, np.eye(m.nv))
-        M_diag = np.diag(np.linalg.inv(Minv))
-        kd_joint = 2.0 * p.ZETA_JOINT * np.sqrt(self.kp_joint * M_diag)
+        M = np.zeros((m.nv, m.nv))
+        mujoco.mj_fullM(m, d, M)                                # matrice d'inerzia dei giunti
+        kd_joint = 2.0 * p.ZETA_JOINT * np.sqrt(self.kp_joint * np.diag(M))
         tau = self.kp_joint * (self.q_ref - q) + kd_joint * (q_dot_cmd - qd)
         d.ctrl[:] = np.clip(tau + d.qfrc_bias[:m.nv], -ps.TORQUE_LIMITS, ps.TORQUE_LIMITS)
-        self._J_pos = J[:3].copy()
-        self.last_F_cmd = np.zeros(6)
-        mujoco.mj_step2(m, d)
+        mujoco.mj_step2(m, d)                                   # dinamica + sensori -> stato al tempo t + dt
         self._ft_raw = d.sensordata[ids["ft_adr"]:ids["ft_adr"] + 6].copy()   # wrench vero per la prossima lettura
 
-        # ---------------------------------------------------------------- log (stesse chiavi di dp.Sim + le nuove)
-        if native:
-            fn, ft, fres, pen, k_eq, tc, ncon = self.contact_force()
-            fhc, closing = self.hunt_crossley_force()
-            tau_ext = d.qfrc_constraint[:m.nv]
-            self._fn_prev = fn
-        else:
-            fn, ft, fres = hc.fn, 0.0, hc.fn
-            fhc, closing = hc.fn, hc.ddelta
-            pen, k_eq, tc, ncon = max(hc.delta, 0.0), hc.k_eq, 0.0, int(hc.fn > 1e-3)
-            tau_ext = tau_hc
-        L = self.log
-        L["t"].append(t); L["fn"].append(fn); L["ft"].append(ft); L["fresultant"].append(fres)
-        L["fmeas"].append(F_meas); L["fn_lpf"].append(self.native_plot_filter.read(fn))
-        L["fhc"].append(fhc); L["fhc_lpf"].append(self.hc_plot_filter.read(fhc))
-        L["delta"].append(pen); L["ddelta"].append(closing); L["k"].append(k_eq)
-        L["compression"].append(compression)
-        L["solref_tc"].append(tc); L["ncontact"].append(ncon)
-        L["zs"].append(zs); L["ztip"].append(pos[2]); L["x"].append(pos[0])
-        L["tau"].append(np.abs(d.ctrl[:]).max())
-        L["fext_tau"].append(float(np.linalg.lstsq(self._J_pos.T, tau_ext, rcond=None)[0] @ n))
-        L["fcmd_z"].append(0.0)
-        probe_center = d.geom_xpos[ids["tip_geom"]]
-        self.visual_deformation = (
-            (float(probe_center[0]), float(probe_center[1]), compression) if compression > 0 else None
-        )
-        for k, val in (("Kd", K_d), ("Bd", B_d), ("Kt", K_t), ("v_in", v_in), ("dist", dist),
-                       ("Fdes_eff", F_des_eff), ("F_virt", F_virt), ("v_lim", v_lim), ("y", pos[1]),
-                       ("x_ref", goal[0]), ("y_ref", goal[1]), ("z_ref", goal[2]), ("scan_s", scan_s),
-                       ("exy", np.hypot(*e_xy[:2])), ("ft_saturated", self.ft.saturated)):
-            L[k].append(float(val))
-        return fn
+        # ---------------------------------------------------------------- log
+        for k, val in (("t", t), ("fn", hc.fn), ("fmeas", F_meas), ("delta", max(hc.delta, 0.0)),
+                       ("ncontact", hc.fn > 1e-3), ("zs", hc.zs), ("ztip", pos[2]), ("x", pos[0]), ("y", pos[1]),
+                       ("tau", np.abs(d.ctrl).max()), ("ft_saturated", self.ft.saturated),
+                       ("Kd", K_d), ("Bd", B_d), ("Kt", K_t), ("v_in", v_in), ("v_lim", v_lim), ("dist", dist),
+                       ("Fdes_eff", F_des_eff), ("F_virt", F_virt), ("x_ref", goal[0]), ("y_ref", goal[1]),
+                       ("z_ref", goal[2]), ("scan_s", scan_s), ("exy", np.hypot(*e_xy))):
+            self.log[k].append(float(val))
+        return hc.fn

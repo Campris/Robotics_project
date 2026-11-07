@@ -2,15 +2,15 @@
 Geometria, respiro, eventi e modello di contatto Hunt-Crossley del torso.
 
 La superficie e' analitica z = zs(x, y, t) (geometria + respiro + eventi).
-Tissue.contact() conserva un modello Hunt-Crossley personalizzato; la demo attuale
-usa invece la superficie come heightfield collidente e legge la forza dal solver MuJoCo.
+Tissue.contact() calcola la forza del tessuto sulla sonda (Hunt-Crossley): e' QUESTA la forza
+che il controllore di ammettenza applica al robot (panda_scene.apply_tip_force).
 
 Convenzioni: unita' SI. z verso l'alto, la normale n punta fuori dal corpo.
 delta > 0 = penetrazione della punta nel tessuto.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from collections import deque
-from typing import Callable, List, Optional
+from typing import Callable, Optional
 import numpy as np
 
 
@@ -22,6 +22,12 @@ def min_jerk(s):
     """0 -> 1 con derivata prima e seconda nulle agli estremi (C2)."""
     s = np.clip(s, 0.0, 1.0)
     return 10 * s**3 - 15 * s**4 + 6 * s**5
+
+
+def min_jerk_dot(s):
+    """Derivata di min_jerk rispetto a s."""
+    s = np.clip(s, 0.0, 1.0)
+    return 30 * s**2 - 60 * s**3 + 30 * s**4
 
 
 # --------------------------------------------------------------------------
@@ -114,20 +120,6 @@ class Event:
         return self.amplitude * min_jerk(1.0 - abs(2.0 * s - 1.0))
 
 
-def random_events(rng, t_end, cough_rate=1 / 20, shift_rate=1 / 40, hiccup_rate=1 / 30) -> List[Event]:
-    """Eventi casuali (processi di Poisson) con ampiezze e durate realistiche."""
-    events = []
-    specs = [(cough_rate, "bump", (0.003, 0.006), (0.3, 0.6)),
-             (hiccup_rate, "bump", (0.001, 0.003), (0.1, 0.25)),
-             (shift_rate, "step", (-0.005, 0.005), (0.5, 1.5))]
-    for rate, kind, amp, dur in specs:
-        t = rng.exponential(1.0 / rate)
-        while t < t_end:
-            events.append(Event(t, rng.uniform(*dur), rng.uniform(*amp), kind))
-            t += rng.exponential(1.0 / rate)
-    return sorted(events, key=lambda e: e.t0)
-
-
 # --------------------------------------------------------------------------
 # Tessuto + contatto Hunt-Crossley
 # --------------------------------------------------------------------------
@@ -138,13 +130,13 @@ class ContactResult:
     delta: float           # penetrazione [m]
     ddelta: float          # velocita' di penetrazione [m/s]
     k_eq: float            # rigidita' equivalente locale [N/m]
-    normal: np.ndarray
+    normal: np.ndarray     # normale uscente della pelle sotto la punta
+    zs: float              # quota della superficie sotto la punta [m]
 
 
 class Tissue:
     """
-    Modello opzionale Hunt-Crossley: F = k * d^n * (1 + 1.5 * alpha * d_dot)
-    La demo a contatto nativo usa geometria, respiro ed eventi, ma non questa forza.
+    Contatto Hunt-Crossley: F = k * d^n * (1 + 1.5 * alpha * d_dot)
       k      [N/m^n]  derivato da k_eq(x,y): k = k_eq * delta_ref^(1-n)
       n      1.5 = Hertz (rigidita' che cresce con la penetrazione)
       alpha  [s/m]  dissipazione
@@ -203,11 +195,11 @@ class Tissue:
         k = k_eq * self.delta_ref ** (1.0 - self.n)
         damping_factor = max(0.0, 1.0 + 1.5 * self.alpha * dd)
         fn = k * d**self.n * damping_factor
-        return ContactResult(fn * n_hat, fn, delta_raw, ddelta_raw, k_eq, n_hat)
+        return ContactResult(fn * n_hat, fn, delta_raw, ddelta_raw, k_eq, n_hat, zs)
 
 
 # --------------------------------------------------------------------------
-# Sensore di forza (modello del F_ext del Panda)
+# Sensore di forza "franka" (modello della stima F_ext del Panda), alternativo all'ATI
 # --------------------------------------------------------------------------
 class ForceSensor:
     """LPF del primo ordine + ritardo + bias + rumore. Parametri da calibrare sul robot reale."""
