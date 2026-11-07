@@ -76,9 +76,9 @@ class Breathing:
     Spostamento lungo z: u(x, t) = gain(x) * s(t).
     s(t) in [0, 1]. Sostituisci `fn` con la TUA funzione respiratoria t -> [0, 1].
     """
-    period: float = 3.0
-    amp_chest: float = 0.025
-    amp_abdomen: float = 0.020
+    period: float = 4.0
+    amp_chest: float = 0.0015
+    amp_abdomen: float = 0.0055
     x_tr: float = 0.02
     fn: Optional[Callable[[float], float]] = None
 

@@ -22,7 +22,9 @@ SX, SY = 0.20, 0.15             # semi-dimensioni patch [m]
 ELEV, BASE = 0.25, 0.05         # quota massima rappresentabile e spessore sotto lo zero [m]
 
 PANDA_BASE_POS = (-0.55, 0.0, 0.0)   # con -0.40 il Panda (sonda verticale) non raggiunge x < -80 mm; con -0.55 tutta la patch
-TIP_Z = 0.107 + 0.15            # punta della sonda lungo l'asse z di link7 [m]
+FLANGE_Z = 0.107                # flangia del Panda lungo l'asse z di link7: qui e' montato il sensore F/T [m]
+TIP_Z = FLANGE_Z + 0.15         # punta della sonda lungo l'asse z di link7 [m]
+PROBE_MASS = 0.30               # massa della sonda (porta-sonda incluso) [kg]
 TIP_RADIUS = 0.022              # raggio della sfera terminale collidente [m]
 TORQUE_LIMITS = np.array([87, 87, 87, 87, 12, 12, 12], dtype=float)
 
@@ -44,14 +46,33 @@ def build_model():
 
     spec.body("link0").pos = PANDA_BASE_POS
 
-    # Sonda sul link7: cilindro visuale, sfera terminale collidente.
+    # Sonda: corpo SEPARATO fissato a link7 (nessun giunto), cosi' fra i due c'e' un'interfaccia
+    # su cui MuJoCo puo' misurare forza e coppia (il sensore ATI fra flangia e sonda).
+    # Nota: link7 nel modello Menagerie ha un <inertial> esplicito, quindi geometrie con massa aggiunte
+    # direttamente a link7 verrebbero ignorate. Nel corpo "probe" la massa della sonda conta davvero.
     link7 = spec.body("link7")
-    link7.add_geom(type=mujoco.mjtGeom.mjGEOM_CYLINDER, size=[0.018, 0.075, 0],
-                   pos=[0, 0, 0.107 + 0.075], mass=0.30, contype=0, conaffinity=0,
+    probe = link7.add_body(name="probe")                     # stesso frame di link7
+    # Massa della sonda (0.30 kg). Invisibile: arriva fino al fondo della sfera e il suo bordo
+    # piatto sporgerebbe sotto di essa.
+    probe.add_geom(type=mujoco.mjtGeom.mjGEOM_CYLINDER, size=[0.018, 0.075, 0],
+                   pos=[0, 0, FLANGE_Z + 0.075], mass=PROBE_MASS, contype=0, conaffinity=0,
+                   rgba=[0.15, 0.15, 0.18, 0])
+    # Corpo visibile della sonda (senza massa): finisce al centro della sfera, cosi' l'emisfero
+    # inferiore e' il punto piu' basso e tocca il tessuto.
+    probe_end = TIP_Z - TIP_RADIUS
+    probe.add_geom(type=mujoco.mjtGeom.mjGEOM_CYLINDER, size=[0.018, (probe_end - FLANGE_Z) / 2, 0],
+                   pos=[0, 0, (FLANGE_Z + probe_end) / 2], mass=0.0, contype=0, conaffinity=0,
                    rgba=[0.15, 0.15, 0.18, 1])
-    link7.add_geom(name="tip_vis", type=mujoco.mjtGeom.mjGEOM_SPHERE, size=[TIP_RADIUS, 0, 0],
-                   pos=[0, 0, TIP_Z - TIP_RADIUS], contype=1, conaffinity=2, rgba=[0.2, 0.8, 0.3, 1])
-    link7.add_site(name="tip", pos=[0, 0, TIP_Z], size=[0.003, 0, 0], rgba=[1, 1, 0, 1])
+    probe.add_geom(name="tip_vis", type=mujoco.mjtGeom.mjGEOM_SPHERE, size=[TIP_RADIUS, 0, 0],
+                   pos=[0, 0, TIP_Z - TIP_RADIUS], mass=0.0, contype=1, conaffinity=2,
+                   rgba=[0.2, 0.8, 0.3, 1])
+    probe.add_site(name="tip", pos=[0, 0, TIP_Z], size=[0.003, 0, 0], rgba=[1, 1, 0, 1])
+    # Sensore F/T sulla flangia: wrench che link7 scambia con la sonda, nel frame del sito "ft".
+    probe.add_site(name="ft", pos=[0, 0, FLANGE_Z], size=[0.004, 0, 0], rgba=[1, 0, 1, 1])
+    spec.add_sensor(name="ft_force", type=mujoco.mjtSensor.mjSENS_FORCE,
+                    objtype=mujoco.mjtObj.mjOBJ_SITE, objname="ft")
+    spec.add_sensor(name="ft_torque", type=mujoco.mjtSensor.mjSENS_TORQUE,
+                    objtype=mujoco.mjtObj.mjOBJ_SITE, objname="ft")
 
     # Torso: heightfield collidente. La maschera lo abbina solo alla sfera della sonda.
     hf = spec.add_hfield(name="tissue_collision", nrow=NR, ncol=NC, size=[SX, SY, ELEV, BASE])
@@ -78,8 +99,27 @@ def build_model():
         tissue_geom=mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "tissue_geom"),
         hfield=mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_HFIELD, "tissue_visual"),
         collision_hfield=mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_HFIELD, "tissue_collision"),
+        probe_body=mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "probe"),
+        ft_site=mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "ft"),
+        ft_adr=int(model.sensor_adr[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SENSOR, "ft_force")]),
     )
+    # forza (3) e coppia (3) devono essere contigue in sensordata: ft_adr .. ft_adr+6
+    assert model.sensor_adr[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SENSOR, "ft_torque")] == ids["ft_adr"] + 3
     return model, ids
+
+
+def apply_tip_force(model, data, body, force, point):
+    """
+    Applica la forza del tessuto `force` (mondo) nel punto `point` del corpo `body` tramite xfrc_applied.
+    xfrc_applied (forza + coppia al baricentro del corpo, in mondo) e' visto anche dai sensori force/torque
+    di MuJoCo, a differenza di qfrc_applied. Dinamicamente equivale a mj_applyFT(force, 0, point, body).
+    Restituisce le coppie di giunto equivalenti (J^T F), utili per la stima "alla Franka" nel log.
+    """
+    data.xfrc_applied[body, :3] = force
+    data.xfrc_applied[body, 3:] = np.cross(point - data.xipos[body], force)
+    tau = np.zeros(model.nv)
+    mujoco.mj_applyFT(model, data, force, np.zeros(3), point, body, tau)
+    return tau
 
 
 _gx = np.linspace(-SX, SX, NC)

@@ -11,6 +11,10 @@ Esegue il controllo di ammettenza (admittance_control.py) e produce grafici e CS
   python run_admittance.py --scan-x -0.16 0.16 --scan-y -0.11 0.11 --row-spacing 0.04 --scan-speed 0.02
   python run_admittance.py --duration 60         # taglia la simulazione a 60 s (utile per prove veloci)
 
+  # sensore di forza (default: ATI Nano17 SI-25-0.25 + Net F/T senza filtro, vedi ft_sensor.py)
+  python run_admittance.py --ati-cal SI-12-0.12 --ati-filter 152
+  python run_admittance.py --sensor franka       # vecchio modello: stima F_ext del Panda (80 Hz, 3 ms, 0.15 N)
+
   # controllore
   python run_admittance.py --M 0.05 --fdes 5 --integrator implicit --kt-mode k_eq --breathing irregular
   python run_admittance.py --kfar 1000 --knear 200 --dfar 0.08 --dnear 0.03 --doff 0.0
@@ -26,6 +30,7 @@ import demo_panda as dp
 from admittance_control import AdmittanceParams, AdmittanceSim, StiffnessSchedule
 from breathing_profiles import PROFILES
 from tissue import Event
+from ft_sensor import CALIBRATIONS, NETFT_FILTERS
 
 FS = 1000
 
@@ -54,7 +59,12 @@ def make_params(a):
 def build_sim(a):
     if a.goal_depth is not None:
         dp.DEPTH = a.goal_depth
-    sim = AdmittanceSim(make_params(a), descent_time=a.descent_time, contact_model=a.contact_model)
+    sim = AdmittanceSim(make_params(a), descent_time=a.descent_time, contact_model=a.contact_model,
+                        sensor=a.sensor, ati_calibration=a.ati_cal,
+                        ati_filter=None if a.ati_filter == "none" else int(a.ati_filter))
+    if a.sensor == "ati":
+        print(f"Sensore: ATI Nano17 {a.ati_cal}, filtro Net F/T {a.ati_filter}, "
+              f"rumore (ipotesi) {sim.ft.noise_std[2]*1000:.1f} mN, portata Fz {sim.ft.range[2]:g} N")
     if sim.p.SCAN_ENABLE:
         estimated = a.descent_time + sim.p.SCAN_DELAY + sim.traj.T
         print(f"Scansione {sim.p.SCAN_PATTERN}: {len(sim.traj.waypoints)} waypoint, "
@@ -196,6 +206,11 @@ if __name__ == "__main__":
     ap.add_argument("--vis-gain", type=float, default=1.0)
     ap.add_argument("--plot-schedule", action="store_true")
     ap.add_argument("--contact-model", choices=("hc", "native"), default="hc")
+    ap.add_argument("--sensor", choices=("ati", "franka"), default="ati",
+                    help="ati: Nano17 + Net F/T alla flangia (wrench MuJoCo); franka: vecchia stima F_ext scalare")
+    ap.add_argument("--ati-cal", choices=sorted(CALIBRATIONS), default="SI-25-0.25", help="calibrazione Nano17")
+    ap.add_argument("--ati-filter", choices=["none"] + [str(f) for f in NETFT_FILTERS if f], default="none",
+                    help="filtro passa-basso del Net F/T [Hz]")
     ap.add_argument("--breathing", choices=sorted(PROFILES), default="regular")
     ap.add_argument("--cough", type=float, default=11.0, help="istante di una tosse di prova [s]; -1 = nessuna")
     ap.add_argument("--descent-time", type=float, default=4.0)

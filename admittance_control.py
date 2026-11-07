@@ -27,6 +27,7 @@ import mujoco
 import demo_panda as dp
 import panda_scene as ps
 from tissue import min_jerk
+from ft_sensor import ATINanoSensor
 
 
 # =====================================================================================================
@@ -60,7 +61,7 @@ class AdmittanceParams:
     # --- limiti di velocita' (lungo la normale) ----------------------------------------------------
     V_CRUISE: float = 0.10         # velocita' massima di avvicinamento lontano dalla pelle [m/s]
     V_TOUCH: float = 0.02          # velocita' massima di avvicinamento entro D_NEAR [m/s]
-    V_CONTACT: float = 0.06        # velocita' massima verso la pelle quando c'e' contatto [m/s]
+    V_CONTACT: float = 0.02        # velocita' massima verso la pelle quando c'e' contatto [m/s]
     V_RETRACT: float = 0.10        # velocita' massima di allontanamento [m/s]
 
     # --- BLOCCO 4a: traiettoria in XY --------------------------------------------------------------
@@ -142,7 +143,7 @@ class StiffnessSchedule:
 # =====================================================================================================
 #  BLOCCO 2: SMORZAMENTO CRITICO DEL TESSUTO
 # =====================================================================================================
-def tissue_stiffness(tissue, x, y, F_des, mode="tangent"):
+def tissue_stiffness(tissue, x, y, F_des, mode="k_eq"):
     """
     K_t [N/m] del tessuto nel punto (x, y).
       "k_eq"    : valore della mappa (rigidezza equivalente lineare a delta_ref = 8 mm)
@@ -272,9 +273,12 @@ class AdmittanceSim(dp.Sim):
     ammettenza ad integratore puro -> IK differenziale -> PD di posizione di giunto.
     """
 
-    def __init__(self, params: AdmittanceParams = None, contact_model="hc", **kw):
+    def __init__(self, params: AdmittanceParams = None, contact_model="hc", sensor="ati",
+                 ati_calibration="SI-25-0.25", ati_filter=None, **kw):
         if contact_model not in ("hc", "native"):
             raise ValueError("contact_model deve essere 'hc' o 'native'")
+        if sensor not in ("ati", "franka"):
+            raise ValueError("sensor deve essere 'ati' (Nano17 al polso) o 'franka' (stima F_ext scalare)")
         params = params or AdmittanceParams()
         trajectory = LineTrajectory(params)
         if params.SCAN_ENABLE:
@@ -288,8 +292,20 @@ class AdmittanceSim(dp.Sim):
         self.q_ref = d.qpos[:m.nv].copy()                       # riferimento di giunto (integrato da q_dot)
         self.kp_joint = np.array(self.p.KP_JOINT)
         self._fn_prev = 0.0                                     # forza dell'istante precedente (solo contatto nativo)
+
+        # Sensore di forza. "ati": Nano17 + Net F/T alla flangia, a partire dal wrench vero di MuJoCo.
+        # "franka": vecchio modello scalare (LPF 80 Hz + 3 ms + 0.15 N) della stima F_ext del Panda.
+        self.sensor_kind = sensor
+        self.ft = ATINanoSensor(self.dt, ati_calibration, ati_filter)
+        # Tara ("Bias" del Net F/T) col robot fermo sopra la pelle: ctrl = compensazione di gravita' -> qacc = 0,
+        # quindi il sensore vede solo il peso della sonda, che la tara toglie.
+        d.ctrl[:] = d.qfrc_bias[:m.nv]
+        mujoco.mj_forward(m, d)
+        self._ft_raw = d.sensordata[self.ids["ft_adr"]:self.ids["ft_adr"] + 6].copy()   # wrench vero (frame ft)
+        self.ft.tare(self._ft_raw)
+
         for k in ("Kd", "Bd", "Kt", "v_in", "dist", "Fdes_eff", "F_virt", "v_lim",
-                  "y", "x_ref", "y_ref", "z_ref", "scan_s", "exy"):
+                  "y", "x_ref", "y_ref", "z_ref", "scan_s", "exy", "ft_saturated"):
             self.log[k] = []
         dp.F_DES = self.p.F_DES                                 # colore della punta nel viewer
 
@@ -311,16 +327,24 @@ class AdmittanceSim(dp.Sim):
         v_tip = J @ qd
         if not native:                                          # forza del tessuto (Hunt-Crossley) sulla punta
             hc = self.tissue.contact(pos, v_tip[:3], t)
-            d.qfrc_applied[:] = 0.0
-            mujoco.mj_applyFT(m, d, hc.force, np.zeros(3), pos, self.body, d.qfrc_applied)
+            tau_hc = ps.apply_tip_force(m, d, self.body, hc.force, pos)   # xfrc_applied: la vede anche il sensore F/T
             fn_true = hc.fn
         else:
             fn_true = self._fn_prev
-        F_meas = self.sensor.read(fn_true)                      # UNICO segnale di forza visto dal controllore
 
         n = self.tissue.normal(pos[0], pos[1], t)               # normale uscente della pelle sotto la punta
         zs = self.tissue.surface_height(pos[0], pos[1], t)
         dist = float((pos[2] - zs) * n[2])                      # distanza dalla pelle lungo n (>0 = sopra)
+
+        # UNICO segnale di forza visto dal controllore
+        if self.sensor_kind == "ati":
+            # wrench tarato nel frame del sensore; _ft_raw e' quello calcolato da MuJoCo nel passo precedente
+            w_meas = self.ft.read(self._ft_raw)
+            R_ft = d.site_xmat[ids["ft_site"]].reshape(3, 3)
+            # il sensore misura la forza che la flangia esercita sulla sonda: dopo la tara vale -F_tessuto
+            F_meas = float(-(R_ft @ w_meas[:3]) @ n)
+        else:
+            F_meas = self.sensor.read(fn_true)
 
         # ---------------------------------------------------------------- BLOCCO 1: soglie di K_d
         K_d = self.schedule.K(dist, F_meas)
@@ -373,6 +397,7 @@ class AdmittanceSim(dp.Sim):
         self._J_pos = J[:3].copy()
         self.last_F_cmd = np.zeros(6)
         mujoco.mj_step2(m, d)
+        self._ft_raw = d.sensordata[ids["ft_adr"]:ids["ft_adr"] + 6].copy()   # wrench vero per la prossima lettura
 
         # ---------------------------------------------------------------- log (stesse chiavi di dp.Sim + le nuove)
         if native:
@@ -384,7 +409,7 @@ class AdmittanceSim(dp.Sim):
             fn, ft, fres = hc.fn, 0.0, hc.fn
             fhc, closing = hc.fn, hc.ddelta
             pen, k_eq, tc, ncon = max(hc.delta, 0.0), hc.k_eq, 0.0, int(hc.fn > 1e-3)
-            tau_ext = d.qfrc_applied[:m.nv]
+            tau_ext = tau_hc
         L = self.log
         L["t"].append(t); L["fn"].append(fn); L["ft"].append(ft); L["fresultant"].append(fres)
         L["fmeas"].append(F_meas); L["fn_lpf"].append(self.native_plot_filter.read(fn))
@@ -403,6 +428,6 @@ class AdmittanceSim(dp.Sim):
         for k, val in (("Kd", K_d), ("Bd", B_d), ("Kt", K_t), ("v_in", v_in), ("dist", dist),
                        ("Fdes_eff", F_des_eff), ("F_virt", F_virt), ("v_lim", v_lim), ("y", pos[1]),
                        ("x_ref", goal[0]), ("y_ref", goal[1]), ("z_ref", goal[2]), ("scan_s", scan_s),
-                       ("exy", np.hypot(*e_xy[:2]))):
+                       ("exy", np.hypot(*e_xy[:2])), ("ft_saturated", self.ft.saturated)):
             L[k].append(float(val))
         return fn

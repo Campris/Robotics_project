@@ -306,8 +306,8 @@ class Sim:
         if not native:
             # forza del tessuto sulla punta (Hunt-Crossley), applicata nel punto di contatto
             hc = self.tissue.contact(p, v[:3], t)
-            d.qfrc_applied[:] = 0.0
-            mujoco.mj_applyFT(m, d, hc.force, np.zeros(3), p, self.body, d.qfrc_applied)
+            # xfrc_applied (non qfrc_applied): cosi' anche il sensore F/T della flangia vede la forza
+            tau_hc = ps.apply_tip_force(m, d, self.body, hc.force, p)
 
         # impedenza cartesiana + compensazione di gravita'/Coriolis + postura nel nullspace
         Minv = np.zeros((m.nv, m.nv))
@@ -335,7 +335,7 @@ class Sim:
             fn, ft, fresultant = hc.fn, 0.0, hc.fn
             fhc, closing_speed = hc.fn, hc.ddelta
             penetration, k_eq, timeconst, ncontact = max(hc.delta, 0.0), hc.k_eq, 0.0, int(hc.fn > 1e-3)
-            tau_ext = d.qfrc_applied[:m.nv]               # coppie della forza applicata (stima "come il Panda")
+            tau_ext = tau_hc                              # coppie della forza applicata (stima "come il Panda")
         L = self.log
         L["t"].append(t); L["fn"].append(fn); L["ft"].append(ft)
         L["fresultant"].append(fresultant); L["fmeas"].append(self.sensor.read(fn))
