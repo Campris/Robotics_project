@@ -51,8 +51,8 @@ class TorsoGeometry:
 @dataclass
 class StiffnessMap:
     """
-    Rigidita' EQUIVALENTE lineare k_eq(x, y) [N/m] alla profondita' di riferimento
-    (forza / penetrazione a delta_ref). Torace (x < x_tr): piu' rigido, con costole
+    Rigidita' EQUIVALENTE k_eq(x, y) [N/m] alla profondita' di riferimento
+    (pendenza dF/d(delta) a delta_ref, rigidezza tangente). Torace (x < x_tr): piu' rigido, con costole
     e sterno. Addome (x > x_tr): morbido. Tutto liscio, senza gradini.
     """
     k_abdomen: float = 500.0
@@ -137,7 +137,7 @@ class ContactResult:
 class Tissue:
     """
     Contatto Hunt-Crossley: F = k * d^n * (1 + 1.5 * alpha * d_dot)
-      k      [N/m^n]  derivato da k_eq(x,y): k = k_eq * delta_ref^(1-n)
+      k      [N/m^n]  derivato da k_eq(x,y): k = k_eq / (n * delta_ref^(n-1))  (dF/d(delta) = k_eq a delta_ref)
       n      1.5 = Hertz (rigidita' che cresce con la penetrazione)
       alpha  [s/m]  dissipazione
     Anti-spike:
@@ -178,21 +178,22 @@ class Tissue:
         x, y, zp = p                                # punta VERA (da MuJoCo): x, y e quota zp
         zs = self.surface_height(x, y, t)           # quota della pelle sotto la punta, adesso
         gx, gy = self._grad(x, y, t)                # pendenze della pelle in x e y
-        nvec = np.array([-gx, -gy, 1.0])            # normale uscente (non ancora lunga 1)
-        inv_norm = 1.0 / np.linalg.norm(nvec)
-        n_hat = nvec * inv_norm                     # normale lunga 1
+        nvec = np.array([-gx, -gy, 1.0])            # normale uscente (non ancora di modulo 1), meno davanti i gradienti perche' la normale punta fuori dal corpo
+        inv_norm = 1.0 / np.linalg.norm(nvec)       # 1/lunghezzadella normale
+        n_hat = nvec * inv_norm                     # se faccio normale per 1/lunghezza della normale ottengo 1
         nz = n_hat[2]                               # = cos(inclinazione della pelle)
 
-        delta_raw = (zs - zp) * nz                  # penetrazione lungo n: >0 punta dentro, <0 in aria
+        delta_raw = (zs - zp) * nz                  # proietto il segmento su asse z del world sulla normale della pelle. Se delta_raw > 0 = punta dentro la pelle, delta_raw < 0 = punta fuori dalla pelle
         zs_dot = (self.surface_height(x, y, t + h) - self.surface_height(x, y, t - h)) / (2 * h)  # pelle sale/scende (respiro, tosse)
-        ddelta_raw = (zs_dot + gx * v[0] + gy * v[1] - v[2]) * nz  # vel. penetrazione (>0 entra) = pelle si muove + punta scivola di lato - punta scende
+        v_pelle = np.array([0.0, 0.0, zs_dot])      # la pelle si muove solo in verticale
+        ddelta_raw = np.dot(v_pelle - v, n_hat)     # vel. relativa pelle-punta lungo la normale: >0 la punta entra, <0 esce
 
         # penetrazione liscia (softplus) e sua derivata
-        d = self.eps * np.logaddexp(0.0, delta_raw / self.eps)   # come max(0, delta_raw) ma senza spigolo (eps = 0.1 mm)
-        dd = sigmoid(delta_raw / self.eps) * ddelta_raw          # velocita' che conta solo a contatto (fuori = 0)
+        d = self.eps * np.logaddexp(0.0, delta_raw / self.eps)    # come max(0, delta_raw) ma senza spigolo (eps = 0.1 mm) ossia ln(1 + exp(delta_raw / eps)) * eps
+        dd = sigmoid(delta_raw / self.eps) * ddelta_raw          # velocita' che conta solo a contatto (fuori = 0) nb: derivata di softplus = sigmoid(delta_raw / eps)
 
         k_eq = float(self.stiff(x, y))                           # rigidezza della mappa (A3) sotto la punta
-        k = k_eq * self.delta_ref ** (1.0 - self.n)              # k di Hunt-Crossley: a delta_ref da' k_eq * delta_ref
+        k = k_eq / (self.n * self.delta_ref ** (self.n - 1.0))  # k di Hunt-Crossley: a delta_ref la pendenza dF/d(delta) vale k_eq
         damping_factor = max(0.0, 1.0 + 1.5 * self.alpha * dd)   # >1 entra, <1 esce; mai <0 (niente forza che tira)
         fn = k * d**self.n * damping_factor                      # Hunt-Crossley: modulo della forza [N]
         return ContactResult(fn * n_hat, fn, delta_raw, ddelta_raw, k_eq, n_hat, zs)  # force = fn lungo la normale

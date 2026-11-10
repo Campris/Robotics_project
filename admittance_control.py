@@ -50,7 +50,7 @@ class AdmittanceParams:
     M_D: float = 0.05              # massa virtuale [kg]  (10 g: ammettenza molto reattiva; vedi nota su rumore e banda)
     KT_MODE: str = "k_eq"          # "k_eq": K_t = k_eq(x,y) della tua mappa (come nella proposta)
                                    # "tangent": pendenza dF/d(delta) del modello Hunt-Crossley al punto di lavoro F_DES
-                                   #            (circa 1.5 k_eq: smorzamento piu' alto, vedi tissue_stiffness)
+                                   #            (circa 0.9 k_eq a 5 N: punto di lavoro sotto delta_ref, vedi tissue_stiffness)
     B_INCLUDE_KD: bool = False     # False: B_d = 2 sqrt(M K_t) (proposta) | True: 2 sqrt(M (K_t + K_d)) anche in avvicinamento
     B_MIN: float = 1.0             # [Ns/m] limite inferiore di sicurezza
 
@@ -145,15 +145,15 @@ class StiffnessSchedule:
 def tissue_stiffness(tissue, x, y, F_des, mode="k_eq"):
     """
     K_t [N/m] del tessuto nel punto (x, y).
-      "k_eq"    : valore della mappa (rigidezza equivalente lineare a delta_ref = 8 mm)
+      "k_eq"    : valore della mappa (pendenza dF/d(delta) a delta_ref = 8 mm)
       "tangent" : pendenza dF/d(delta) del modello Hunt-Crossley F = k d^n al punto di lavoro F = F_des.
-                  d* = (F_des / k)^(1/n)  ->  K_t = n * F_des / d*      (con n = 1.5 e' circa 1.5 k_eq)
+                  d* = (F_des / k)^(1/n)  ->  K_t = n * F_des / d*      (= k_eq * sqrt(d*/delta_ref): circa 0.9 k_eq a 5 N)
     """
     k_eq = float(tissue.stiff(x, y))
     if mode == "k_eq":
         return k_eq
     n = tissue.n
-    k = k_eq * tissue.delta_ref ** (1.0 - n)
+    k = k_eq / (n * tissue.delta_ref ** (n - 1.0))   # stessa k del tessuto (tissue.py, contact)
     d_star = (F_des / k) ** (1.0 / n)
     return n * F_des / d_star
 
