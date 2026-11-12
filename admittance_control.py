@@ -25,7 +25,7 @@ import numpy as np
 import mujoco
 
 import panda_scene as ps
-from tissue import Tissue, ForceSensor, min_jerk, min_jerk_dot
+from tissue import Tissue, min_jerk, min_jerk_dot
 from ft_sensor import ATINanoSensor
 
 
@@ -277,10 +277,8 @@ class AdmittanceSim:
     Ogni chiamata a step() e' un passo fisico da 1 ms; i segnali finiscono in self.log.
     """
 
-    def __init__(self, params: AdmittanceParams = None, sensor="ati", ati_calibration="SI-25-0.25",
+    def __init__(self, params: AdmittanceParams = None, ati_calibration="SI-25-0.25",
                  ati_filter=None, start_xy=(0.0, 0.0), descent_time=4.0, goal_depth=GOAL_DEPTH, seed=0):
-        if sensor not in ("ati", "franka"):
-            raise ValueError("sensor deve essere 'ati' (Nano17 al polso) o 'franka' (stima F_ext scalare)")
         if descent_time <= 0:
             raise ValueError("descent_time deve essere positivo")
         self.p = params or AdmittanceParams()
@@ -314,11 +312,8 @@ class AdmittanceSim:
         self.q_ref = d.qpos[:m.nv].copy()                       # riferimento di giunto (integrato da q_dot)
         self.kp_joint = np.array(self.p.KP_JOINT)
 
-        # Sensore di forza. "ati": Nano17 + Net F/T alla flangia, a partire dal wrench vero di MuJoCo.
-        # "franka": vecchio modello scalare (LPF 80 Hz + 3 ms + 0.15 N) della stima F_ext del Panda.
-        self.sensor_kind = sensor
-        self.sensor = ForceSensor(self.dt, seed=seed)
-        self.ft = ATINanoSensor(self.dt, ati_calibration, ati_filter)
+        # Sensore di forza: ATI Nano17 + Net F/T alla flangia, a partire dal wrench vero di MuJoCo.
+        self.ft = ATINanoSensor(self.dt, ati_calibration, ati_filter, seed=seed)
         # Tara ("Bias" del Net F/T) col robot fermo sopra la pelle: ctrl = compensazione di gravita' -> qacc = 0,
         # quindi il sensore vede solo il peso della sonda, che la tara toglie.
         d.ctrl[:] = d.qfrc_bias[:m.nv]
@@ -353,15 +348,12 @@ class AdmittanceSim:
         n = hc.normal                                           # normale uscente della pelle sotto la punta
         dist = -hc.delta                                        # distanza dalla pelle lungo n (>0 = sopra)
 
-        # UNICO segnale di forza visto dal controllore
-        if self.sensor_kind == "ati":
-            # wrench tarato nel frame del sensore; _ft_raw e' quello calcolato da MuJoCo nel passo precedente
-            w_meas = self.ft.read(self._ft_raw)
-            R_ft = d.site_xmat[ids["ft_site"]].reshape(3, 3)
-            # il sensore misura la forza che la flangia esercita sulla sonda: dopo la tara vale -F_tessuto
-            F_meas = float(-(R_ft @ w_meas[:3]) @ n)
-        else:
-            F_meas = self.sensor.read(hc.fn)
+        # UNICO segnale di forza visto dal controllore: wrench ATI tarato nel frame del sensore;
+        # _ft_raw e' quello calcolato da MuJoCo nel passo precedente
+        w_meas = self.ft.read(self._ft_raw)
+        R_ft = d.site_xmat[ids["ft_site"]].reshape(3, 3)
+        # il sensore misura la forza che la flangia esercita sulla sonda: dopo la tara vale -F_tessuto
+        F_meas = float(-(R_ft @ w_meas[:3]) @ n)
 
         # ---------------------------------------------------------------- BLOCCO 1: soglie di K_d
         K_d = self.schedule.K(dist, F_meas)

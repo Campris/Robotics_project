@@ -13,10 +13,9 @@ Esegue il controllo di ammettenza (admittance_control.py) e produce grafici e CS
 
   # sensore di forza (default: ATI Nano17 SI-25-0.25 + Net F/T senza filtro, vedi ft_sensor.py)
   python run_admittance.py --ati-cal SI-12-0.12 --ati-filter 152
-  python run_admittance.py --sensor franka       # vecchio modello: stima F_ext del Panda (80 Hz, 3 ms, 0.15 N)
 
   # controllore
-  python run_admittance.py --M 0.05 --fdes 5 --integrator implicit --kt-mode k_eq --breathing irregular
+  python run_admittance.py --M 0.05 --fdes 5 --integrator implicit --kt-mode k_eq --events-seed 3
   python run_admittance.py --kfar 1000 --knear 200 --dfar 0.08 --dnear 0.03 --doff 0.0
 
 Il CSV ha un campione ogni --csv-stride passi (default 1 = 1 kHz; con 170 s sono circa 30 MB: usa 10 per 100 Hz).
@@ -29,8 +28,7 @@ import numpy as np
 
 import panda_scene as ps
 from admittance_control import AdmittanceParams, AdmittanceSim, StiffnessSchedule, GOAL_DEPTH
-from breathing_profiles import PROFILES
-from tissue import Event
+from tissue import gaussian_events
 from ft_sensor import CALIBRATIONS, NETFT_FILTERS
 
 FS = 1000
@@ -59,18 +57,14 @@ def make_params(a):
 
 def build_sim(a):
     sim = AdmittanceSim(make_params(a), descent_time=a.descent_time, goal_depth=a.goal_depth,
-                        sensor=a.sensor, ati_calibration=a.ati_cal,
+                        ati_calibration=a.ati_cal,
                         ati_filter=None if a.ati_filter == "none" else int(a.ati_filter))
-    if a.sensor == "ati":
-        print(f"Sensore: ATI Nano17 {a.ati_cal}, filtro Net F/T {a.ati_filter}, "
-              f"rumore (ipotesi) {sim.ft.noise_std[2]*1000:.1f} mN, portata Fz {sim.ft.range[2]:g} N")
+    print(f"Sensore: ATI Nano17 {a.ati_cal}, filtro Net F/T {a.ati_filter}, "
+          f"rumore (ipotesi) {sim.ft.noise_std[2]*1000:.1f} mN, portata Fz {sim.ft.range[2]:g} N")
     if sim.p.SCAN_ENABLE:
         estimated = a.descent_time + sim.p.SCAN_DELAY + sim.traj.T
         print(f"Scansione {sim.p.SCAN_PATTERN}: {len(sim.traj.waypoints)} waypoint, "
               f"{sim.traj.length:.2f} m, circa {estimated:.0f} s con contatto continuo")
-    sim.tissue.events = [Event(a.cough, 0.4, 0.005, "bump")] if a.cough is not None and a.cough >= 0 else []
-    if a.breathing != "regular":
-        sim.tissue.breathing = PROFILES[a.breathing]()
     return sim
 
 
@@ -231,13 +225,10 @@ if __name__ == "__main__":
     ap.add_argument("--viewer", action="store_true")
     ap.add_argument("--vis-gain", type=float, default=1.0)
     ap.add_argument("--plot-schedule", action="store_true")
-    ap.add_argument("--sensor", choices=("ati", "franka"), default="ati",
-                    help="ati: Nano17 + Net F/T alla flangia (wrench MuJoCo); franka: vecchia stima F_ext scalare")
     ap.add_argument("--ati-cal", choices=sorted(CALIBRATIONS), default="SI-25-0.25", help="calibrazione Nano17")
     ap.add_argument("--ati-filter", choices=["none"] + [str(f) for f in NETFT_FILTERS if f], default="none",
                     help="filtro passa-basso del Net F/T [Hz]")
-    ap.add_argument("--breathing", choices=sorted(PROFILES), default="regular")
-    ap.add_argument("--cough", type=float, default=11.0, help="istante di una tosse di prova [s]; -1 = nessuna")
+    ap.add_argument("--events-seed", type=int, default=0, help="seme dei sussulti gaussiani casuali; -1 = nessun sussulto")
     ap.add_argument("--descent-time", type=float, default=4.0)
     ap.add_argument("--goal-depth", type=float, default=GOAL_DEPTH, help="profondita' dell'obiettivo del planner [m]")
     ap.add_argument("--settle", type=float, default=3.0, help="secondi dopo il primo contatto prima delle statistiche")
@@ -265,6 +256,10 @@ if __name__ == "__main__":
     if a.duration is None:
         a.duration = (a.descent_time + sim.p.SCAN_DELAY + sim.traj.T + 3.0) if sim.p.SCAN_ENABLE else 15.0
     print(f"durata simulazione: {a.duration:.1f} s")
+    if a.events_seed >= 0:
+        sim.tissue.events = gaussian_events(seed=a.events_seed, t_end=a.duration)
+        print("sussulti gaussiani: " + ", ".join(f"{e.t0:.1f} s ({e.amplitude*1000:.1f} mm, sigma {e.duration:.2f} s)"
+                                                  for e in sim.tissue.events))
     if a.viewer:
         run_viewer(sim, a.duration, a.vis_gain)
     else:

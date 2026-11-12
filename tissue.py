@@ -9,7 +9,6 @@ Convenzioni: unita' SI. z verso l'alto, la normale n punta fuori dal corpo.
 delta > 0 = penetrazione della punta nel tessuto.
 """
 from dataclasses import dataclass
-from collections import deque
 from typing import Callable, Optional
 import numpy as np
 
@@ -104,13 +103,15 @@ class Breathing:
 
 @dataclass
 class Event:
-    """Evento liscio (C2). 'bump' sale e scende (tosse, singhiozzo); 'step' resta (spostamento)."""
+    """Evento liscio. 'gauss' = impulso gaussiano (t0 = picco, duration = sigma); 'bump' sale e scende (C2); 'step' resta."""
     t0: float               #siccome non c'è l' = non sono di default, ma vanno settati ogni volta che si crea un oggetto Event
     duration: float
     amplitude: float       # [m], positivo = la pelle sale verso la sonda
     kind: str = "bump"
 
     def value(self, t):
+        if self.kind == "gauss":            # impulso gaussiano: A * exp(-(t - t0)^2 / (2 sigma^2)), liscio ovunque
+            return self.amplitude * np.exp(-0.5 * ((t - self.t0) / self.duration) ** 2)
         s = (t - self.t0) / self.duration   #tempo locale dell'evento, normalizzato alla durata
         if self.kind == "step":             #evento del tipo: pelle sale e resta alta
             return self.amplitude * min_jerk(s)   
@@ -118,6 +119,17 @@ class Event:
             return 0.0
         return self.amplitude * min_jerk(1.0 - abs(2.0 * s - 1.0))  #sto facendo smussamento di segnale triangolare 1-abs(2t-1)
                                                                     #che va da 0 a 1 a 0, e lo smusso con min_jerk per avere continuita' C2
+
+
+def gaussian_events(seed=0, t_end=200.0, t_first=10.0, rate=1 / 20, A=(0.005, 0.010), sigma=(0.15, 0.35)):
+    """Sussulti casuali (appunti T2): impulsi gaussiani con picco t0, ampiezza A [m] e sigma [s] estratti a caso."""
+    rng = np.random.default_rng(seed)                       # generatore con seme: stesso seed, stessi eventi
+    events = []
+    t0 = t_first + rng.exponential(1 / rate)                # primo picco: dopo t_first, attesa media 1/rate = 20 s
+    while t0 < t_end:
+        events.append(Event(t0, rng.uniform(*sigma), rng.uniform(*A), "gauss"))  # Event(t0, duration=sigma, amplitude)
+        t0 += rng.exponential(1 / rate)                     # attesa casuale fino al picco successivo
+    return events
 
 
 # --------------------------------------------------------------------------
@@ -197,22 +209,3 @@ class Tissue:
         damping_factor = max(0.0, 1.0 + 1.5 * self.alpha * dd)   # >1 entra, <1 esce; mai <0 (niente forza che tira)
         fn = k * d**self.n * damping_factor                      # Hunt-Crossley: modulo della forza [N]
         return ContactResult(fn * n_hat, fn, delta_raw, ddelta_raw, k_eq, n_hat, zs)  # force = fn lungo la normale
-
-
-# --------------------------------------------------------------------------
-# Sensore di forza "franka" (modello della stima F_ext del Panda), alternativo all'ATI
-# --------------------------------------------------------------------------
-class ForceSensor:
-    """LPF del primo ordine + ritardo + bias + rumore. Parametri da calibrare sul robot reale."""
-
-    def __init__(self, dt, fc=80.0, noise_std=0.15, bias=0.0, delay_s=0.003, seed=0):
-        self.a = 1.0 - np.exp(-2 * np.pi * fc * dt)
-        self.y = 0.0
-        self.noise_std, self.bias = noise_std, bias
-        self.buf = deque([0.0] * (int(round(delay_s / dt)) + 1), maxlen=int(round(delay_s / dt)) + 1)
-        self.rng = np.random.default_rng(seed)
-
-    def read(self, f_true):
-        self.y += self.a * (f_true - self.y)
-        self.buf.append(self.y)
-        return self.buf[0] + self.bias + self.rng.normal(0.0, self.noise_std)
