@@ -53,7 +53,4 @@ Lo smorzamento `B_d` usa oggi la rigidezza vera del tessuto nel punto di contatt
 Nella fase successiva sarà calcolato una sola volta da una stima unica della rigidezza, come sul robot reale.
 Un agente SAC lo modulerà di ±20 % e sommerà una forza correttiva all'ingresso dell'ammettenza.
 
-## Licenze
 
-`franka_emika_panda/` viene dalle [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie) di
-Google DeepMind, con licenza Apache 2.0 (`franka_emika_panda/LICENSE`).
