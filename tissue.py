@@ -13,7 +13,7 @@ from typing import Callable, Optional
 import numpy as np
 
 
-def sigmoid(x):                                              #sigmoid((u-c/w)) dove c è il centro della transizione e w la larghezza della transizione
+def sigmoid(x):
     return 0.5 * (1.0 + np.tanh(0.5 * x))
 
 
@@ -28,15 +28,13 @@ def min_jerk_dot(s):
     s = np.clip(s, 0.0, 1.0)
     return 30 * s**2 - 60 * s**3 + 30 * s**4
 
-#---------------------------------------------------------------------------
-# Geometria
-# --------------------------------------------------------------------------
+
 @dataclass
 class TorsoGeometry:
     """Sezione ellittica (curvatura trasversale) con asse x cranio-caudale."""
-    H: float = 0.10        # altezza dell'apice [m]
-    B: float = 0.20        # semiasse trasversale [m]
-    taper: float = 0.0     # variazione di altezza lungo x
+    H: float = 0.10
+    B: float = 0.20
+    taper: float = 0.0
     z_base: float = 0.0
 
     def z0(self, x, y):
@@ -44,9 +42,6 @@ class TorsoGeometry:
         return self.z_base + self.H * np.sqrt(1.0 - r**2) * (1.0 + self.taper * x)
 
 
-# --------------------------------------------------------------------------
-# Rigidita' variabile con la posizione
-# --------------------------------------------------------------------------
 @dataclass
 class StiffnessMap:
     """
@@ -62,40 +57,37 @@ class StiffnessMap:
     rib_pitch: float = 0.03
 
     def __call__(self, x, y):
-        w_th = 1.0 - sigmoid((x - self.x_tr) / 0.02)          #sigmoide che va circa 1 a 4 larghezze della transizione tra torace e addome
-        ribs = (0.5 * (1 + np.cos(2 * np.pi * x / self.rib_pitch))) ** 2    #(0.5·(1 + cos(2π·u/T)))²	
+        w_th = 1.0 - sigmoid((x - self.x_tr) / 0.02)
+        ribs = (0.5 * (1 + np.cos(2 * np.pi * x / self.rib_pitch))) ** 2
         ribs *= sigmoid((abs(y) - 0.03) / 0.01)         
-        sternum = np.exp(-0.5 * (y / 0.015) ** 2)     #exp(−0.5·(u/σ)²)  campana gaussiana
+        sternum = np.exp(-0.5 * (y / 0.015) ** 2)
         return (self.k_abdomen
                 + w_th * ((self.k_chest - self.k_abdomen)
                           + self.k_rib * ribs + self.k_sternum * sternum))
 
 
-# --------------------------------------------------------------------------
-# Respiro ed eventi
-# --------------------------------------------------------------------------
 @dataclass
 class Breathing:
     """
     u(x, t) = gain(x) * s(t) [m]: gain = QUANTO sale quel punto, s = QUANDO (0 espirato, 1 inspirato, max 1.15).
     Con fn = la TUA funzione t -> s si sostituisce il modello di s() (period viene ignorato).
     """
-    period: float = 4.0                            # [s] durata di un respiro (QUANDO)
-    amp_chest: float = 0.0015                      # [m] salita del torace a s = 1 (QUANTO)
-    amp_abdomen: float = 0.0055                    # [m] salita dell'addome a s = 1 (QUANTO)
-    x_tr: float = 0.02                             # [m] centro transizione torace-addome (NON e' StiffnessMap.x_tr)
-    fn: Optional[Callable[[float], float]] = None  # funzione t -> s; None = modello qui sotto
+    period: float = 4.0
+    amp_chest: float = 0.0015
+    amp_abdomen: float = 0.0055
+    x_tr: float = 0.02
+    fn: Optional[Callable[[float], float]] = None
 
     def s(self, t):
         if self.fn is not None:
-            return self.fn(t)                               # usa la funzione passata ed esce
-        phi = 2 * np.pi * t / self.period                   # tempo -> angolo: un respiro = un giro
-        phi_w = phi + 0.35 * np.sin(phi)                    # QUANDO: forma del ciclo (resta simmetrica, cima a T/2)
-        mod = 1.0 + 0.15 * np.sin(2 * np.pi * t / 17.0)     # QUANTO: profondita' 0.85..1.15, periodo 17 s
-        return mod * 0.5 * (1.0 - np.cos(phi_w))            # gobba 0 -> 1 -> 0 (parte espirato), scalata da mod
+            return self.fn(t)
+        phi = 2 * np.pi * t / self.period
+        phi_w = phi + 0.35 * np.sin(phi)
+        mod = 1.0 + 0.15 * np.sin(2 * np.pi * t / 17.0)
+        return mod * 0.5 * (1.0 - np.cos(phi_w))
 
     def gain(self, x):
-        return self.amp_chest + (self.amp_abdomen - self.amp_chest) * sigmoid((x - self.x_tr) / 0.03)  # media in x_tr
+        return self.amp_chest + (self.amp_abdomen - self.amp_chest) * sigmoid((x - self.x_tr) / 0.03)
 
     def u(self, x, t):
         return self.gain(x) * self.s(t)
@@ -104,46 +96,42 @@ class Breathing:
 @dataclass
 class Event:
     """Evento liscio. 'gauss' = impulso gaussiano (t0 = picco, duration = sigma); 'bump' sale e scende (C2); 'step' resta."""
-    t0: float               #siccome non c'è l' = non sono di default, ma vanno settati ogni volta che si crea un oggetto Event
+    t0: float
     duration: float
-    amplitude: float       # [m], positivo = la pelle sale verso la sonda
+    amplitude: float
     kind: str = "bump"
 
     def value(self, t):
-        if self.kind == "gauss":            # impulso gaussiano: A * exp(-(t - t0)^2 / (2 sigma^2)), liscio ovunque
+        if self.kind == "gauss":
             return self.amplitude * np.exp(-0.5 * ((t - self.t0) / self.duration) ** 2)
-        s = (t - self.t0) / self.duration   #tempo locale dell'evento, normalizzato alla durata
-        if self.kind == "step":             #evento del tipo: pelle sale e resta alta
+        s = (t - self.t0) / self.duration
+        if self.kind == "step":
             return self.amplitude * min_jerk(s)   
-        if s <= 0.0 or s >= 1.0:            #qui sono fuori dall'evento, quindi non c'è spostamento della pelle
+        if s <= 0.0 or s >= 1.0:
             return 0.0
-        return self.amplitude * min_jerk(1.0 - abs(2.0 * s - 1.0))  #sto facendo smussamento di segnale triangolare 1-abs(2t-1)
-                                                                    #che va da 0 a 1 a 0, e lo smusso con min_jerk per avere continuita' C2
+        return self.amplitude * min_jerk(1.0 - abs(2.0 * s - 1.0))
 
 
 def gaussian_events(seed=0, t_end=200.0, t_first=10.0, rate=1 / 20, A=(0.005, 0.010), sigma=(0.15, 0.35)):
     """Sussulti casuali (appunti T2): impulsi gaussiani con picco t0, ampiezza A [m] e sigma [s] estratti a caso."""
-    rng = np.random.default_rng(seed)                       # generatore con seme: stesso seed, stessi eventi
+    rng = np.random.default_rng(seed)
     events = []
-    t0 = t_first + rng.exponential(1 / rate)                # primo picco: dopo t_first, attesa media 1/rate = 20 s
+    t0 = t_first + rng.exponential(1 / rate)
     while t0 < t_end:
-        events.append(Event(t0, rng.uniform(*sigma), rng.uniform(*A), "gauss"))  # Event(t0, duration=sigma, amplitude)
-        t0 += rng.exponential(1 / rate)                     # attesa casuale fino al picco successivo
+        events.append(Event(t0, rng.uniform(*sigma), rng.uniform(*A), "gauss"))
+        t0 += rng.exponential(1 / rate)
     return events
 
 
-# --------------------------------------------------------------------------
-# Tessuto + contatto Hunt-Crossley
-# --------------------------------------------------------------------------
 @dataclass
 class ContactResult:
-    force: np.ndarray      # forza del tessuto sulla sonda [N], mondo
-    fn: float              # modulo della forza normale [N]
-    delta: float           # penetrazione [m]
-    ddelta: float          # velocita' di penetrazione [m/s]
-    k_eq: float            # rigidita' equivalente locale [N/m]
-    normal: np.ndarray     # normale uscente della pelle sotto la punta
-    zs: float              # quota della superficie sotto la punta [m]
+    force: np.ndarray
+    fn: float
+    delta: float
+    ddelta: float
+    k_eq: float
+    normal: np.ndarray
+    zs: float
 
 
 class Tissue:
@@ -162,22 +150,21 @@ class Tissue:
 
     def __init__(self, geom=None, stiff=None, breathing=None, events=None,
                  n=1.5, alpha=1.5, delta_ref=0.008, eps=1e-4):
-        self.geom = geom or TorsoGeometry()                      #questo or è per dire se nessuno me l'ha dato uso il default
-        self.stiff = stiff or StiffnessMap()                                       #mappa della rigidezza, default = StiffnessMap() con parametri di default
-        self.breathing = breathing or Breathing()                                  #mod ello di respiro, default = Breathing() con parametri di default
-        self.events = list(events or [])                                           # lista di eventi (vuota di default)
-        self.n, self.alpha, self.delta_ref, self.eps = n, alpha, delta_ref, eps    # parametri del contatto (A6)
+        self.geom = geom or TorsoGeometry()
+        self.stiff = stiff or StiffnessMap()
+        self.breathing = breathing or Breathing()
+        self.events = list(events or [])
+        self.n, self.alpha, self.delta_ref, self.eps = n, alpha, delta_ref, eps
 
-    # -- superficie --------------------------------------------------------
     def surface_height(self, x, y, t):
-        z = self.geom.z0(x, y) + self.breathing.u(x, t)       #forma a riposo + respiro
-        for e in self.events:                                 #per ogni evento, se attivo, sommo lo spostamento della pelle dovuto all'evento
+        z = self.geom.z0(x, y) + self.breathing.u(x, t)
+        for e in self.events:
             z += e.value(t)
         return z
 
     def _grad(self, x, y, t, h=1e-4):
-        gx = (self.surface_height(x + h, y, t) - self.surface_height(x - h, y, t)) / (2 * h)  #derivata parziale della superficie rispetto a x
-        gy = (self.surface_height(x, y + h, t) - self.surface_height(x, y - h, t)) / (2 * h)   #derivata parziale della superficie rispetto a y
+        gx = (self.surface_height(x + h, y, t) - self.surface_height(x - h, y, t)) / (2 * h)
+        gy = (self.surface_height(x, y + h, t) - self.surface_height(x, y - h, t)) / (2 * h)
         return gx, gy
 
     def normal(self, x, y, t):
@@ -185,27 +172,25 @@ class Tissue:
         n = np.array([-gx, -gy, 1.0])
         return n / np.linalg.norm(n)
 
-    # -- contatto ----------------------------------------------------------
     def contact(self, p, v, t, h=5e-4) -> ContactResult:
-        x, y, zp = p                                # punta VERA (da MuJoCo): x, y e quota zp
-        zs = self.surface_height(x, y, t)           # quota della pelle sotto la punta, adesso
-        gx, gy = self._grad(x, y, t)                # pendenze della pelle in x e y
-        nvec = np.array([-gx, -gy, 1.0])            # normale uscente (non ancora di modulo 1), meno davanti i gradienti perche' la normale punta fuori dal corpo
-        inv_norm = 1.0 / np.linalg.norm(nvec)       # 1/lunghezzadella normale
-        n_hat = nvec * inv_norm                     # se faccio normale per 1/lunghezza della normale ottengo 1
-        nz = n_hat[2]                               # = cos(inclinazione della pelle)
+        x, y, zp = p
+        zs = self.surface_height(x, y, t)
+        gx, gy = self._grad(x, y, t)
+        nvec = np.array([-gx, -gy, 1.0])
+        inv_norm = 1.0 / np.linalg.norm(nvec)
+        n_hat = nvec * inv_norm
+        nz = n_hat[2]
 
-        delta_raw = (zs - zp) * nz                  # proietto il segmento su asse z del world sulla normale della pelle. Se delta_raw > 0 = punta dentro la pelle, delta_raw < 0 = punta fuori dalla pelle
-        zs_dot = (self.surface_height(x, y, t + h) - self.surface_height(x, y, t - h)) / (2 * h)  # pelle sale/scende (respiro, tosse)
-        v_pelle = np.array([0.0, 0.0, zs_dot])      # la pelle si muove solo in verticale
-        ddelta_raw = np.dot(v_pelle - v, n_hat)     # vel. relativa pelle-punta lungo la normale: >0 la punta entra, <0 esce
+        delta_raw = (zs - zp) * nz
+        zs_dot = (self.surface_height(x, y, t + h) - self.surface_height(x, y, t - h)) / (2 * h)
+        v_pelle = np.array([0.0, 0.0, zs_dot])
+        ddelta_raw = np.dot(v_pelle - v, n_hat)
 
-        # penetrazione liscia (softplus) e sua derivata
-        d = self.eps * np.logaddexp(0.0, delta_raw / self.eps)    # come max(0, delta_raw) ma senza spigolo (eps = 0.1 mm) ossia ln(1 + exp(delta_raw / eps)) * eps
-        dd = sigmoid(delta_raw / self.eps) * ddelta_raw          # velocita' che conta solo a contatto (fuori = 0) nb: derivata di softplus = sigmoid(delta_raw / eps)
+        d = self.eps * np.logaddexp(0.0, delta_raw / self.eps)
+        dd = sigmoid(delta_raw / self.eps) * ddelta_raw
 
-        k_eq = float(self.stiff(x, y))                           # rigidezza della mappa (A3) sotto la punta
-        k = k_eq / (self.n * self.delta_ref ** (self.n - 1.0))  # k di Hunt-Crossley: a delta_ref la pendenza dF/d(delta) vale k_eq
-        damping_factor = max(0.0, 1.0 + 1.5 * self.alpha * dd)   # >1 entra, <1 esce; mai <0 (niente forza che tira)
-        fn = k * d**self.n * damping_factor                      # Hunt-Crossley: modulo della forza [N]
-        return ContactResult(fn * n_hat, fn, delta_raw, ddelta_raw, k_eq, n_hat, zs)  # force = fn lungo la normale
+        k_eq = float(self.stiff(x, y))
+        k = k_eq / (self.n * self.delta_ref ** (self.n - 1.0))
+        damping_factor = max(0.0, 1.0 + 1.5 * self.alpha * dd)
+        fn = k * d**self.n * damping_factor
+        return ContactResult(fn * n_hat, fn, delta_raw, ddelta_raw, k_eq, n_hat, zs)
