@@ -32,9 +32,9 @@ def min_jerk_dot(s):
 @dataclass
 class TorsoGeometry:
     """Sezione ellittica (curvatura trasversale) con asse x cranio-caudale."""
-    H: float = 0.10
-    B: float = 0.20
-    taper: float = 0.0
+    H: float = 0.10        # altezza dell'apice [m]
+    B: float = 0.20        # semiasse trasversale [m]
+    taper: float = 0.0     # variazione di altezza lungo x
     z_base: float = 0.0
 
     def z0(self, x, y):
@@ -49,17 +49,17 @@ class StiffnessMap:
     (pendenza dF/d(delta) a delta_ref, rigidezza tangente). Torace (x < x_tr): piu' rigido, con costole
     e sterno. Addome (x > x_tr): morbido. Tutto liscio, senza gradini.
     """
-    k_abdomen: float = 500.0
-    k_chest: float = 900.0
-    k_rib: float = 600.0
-    k_sternum: float = 700.0
-    x_tr: float = 0.02
-    rib_pitch: float = 0.03
+    k_abdomen: float = 500.0   # [N/m] addome
+    k_chest: float = 900.0     # [N/m] torace
+    k_rib: float = 600.0       # [N/m] contributo delle costole
+    k_sternum: float = 700.0   # [N/m] contributo dello sterno
+    x_tr: float = 0.02         # [m] centro transizione torace-addome
+    rib_pitch: float = 0.03    # [m] passo delle costole lungo x
 
     def __call__(self, x, y):
         w_th = 1.0 - sigmoid((x - self.x_tr) / 0.02)
         ribs = (0.5 * (1 + np.cos(2 * np.pi * x / self.rib_pitch))) ** 2
-        ribs *= sigmoid((abs(y) - 0.03) / 0.01)         
+        ribs *= sigmoid((abs(y) - 0.03) / 0.01)
         sternum = np.exp(-0.5 * (y / 0.015) ** 2)
         return (self.k_abdomen
                 + w_th * ((self.k_chest - self.k_abdomen)
@@ -72,11 +72,11 @@ class Breathing:
     u(x, t) = gain(x) * s(t) [m]: gain = QUANTO sale quel punto, s = QUANDO (0 espirato, 1 inspirato, max 1.15).
     Con fn = la TUA funzione t -> s si sostituisce il modello di s() (period viene ignorato).
     """
-    period: float = 4.0
-    amp_chest: float = 0.0015
-    amp_abdomen: float = 0.0055
-    x_tr: float = 0.02
-    fn: Optional[Callable[[float], float]] = None
+    period: float = 4.0                            # [s] durata di un respiro
+    amp_chest: float = 0.0015                      # [m] salita del torace a s = 1
+    amp_abdomen: float = 0.0055                    # [m] salita dell'addome a s = 1
+    x_tr: float = 0.02                             # [m] centro transizione torace-addome
+    fn: Optional[Callable[[float], float]] = None  # funzione t -> s; None = modello qui sotto
 
     def s(self, t):
         if self.fn is not None:
@@ -96,9 +96,9 @@ class Breathing:
 @dataclass
 class Event:
     """Evento liscio. 'gauss' = impulso gaussiano (t0 = picco, duration = sigma); 'bump' sale e scende (C2); 'step' resta."""
-    t0: float
-    duration: float
-    amplitude: float
+    t0: float              # [s] picco ('gauss') o inizio ('bump', 'step')
+    duration: float        # [s] sigma ('gauss') o durata della transizione
+    amplitude: float       # [m], positivo = la pelle sale verso la sonda
     kind: str = "bump"
 
     def value(self, t):
@@ -106,7 +106,7 @@ class Event:
             return self.amplitude * np.exp(-0.5 * ((t - self.t0) / self.duration) ** 2)
         s = (t - self.t0) / self.duration
         if self.kind == "step":
-            return self.amplitude * min_jerk(s)   
+            return self.amplitude * min_jerk(s)
         if s <= 0.0 or s >= 1.0:
             return 0.0
         return self.amplitude * min_jerk(1.0 - abs(2.0 * s - 1.0))
@@ -125,13 +125,13 @@ def gaussian_events(seed=0, t_end=200.0, t_first=10.0, rate=1 / 20, A=(0.005, 0.
 
 @dataclass
 class ContactResult:
-    force: np.ndarray
-    fn: float
-    delta: float
-    ddelta: float
-    k_eq: float
-    normal: np.ndarray
-    zs: float
+    force: np.ndarray      # forza del tessuto sulla sonda [N], mondo
+    fn: float              # modulo della forza normale [N]
+    delta: float           # penetrazione [m]
+    ddelta: float          # velocita' di penetrazione [m/s]
+    k_eq: float            # rigidita' equivalente locale [N/m]
+    normal: np.ndarray     # normale uscente della pelle sotto la punta
+    zs: float              # quota della superficie sotto la punta [m]
 
 
 class Tissue:

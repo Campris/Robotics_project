@@ -60,7 +60,7 @@ class ATINanoSensor:
         self.drift = np.array([drift_per_s] * 3 + [0.0] * 3)
         self.rng = np.random.default_rng(seed)
         self.saturated = False
-    
+
     def _acquire(self, wrench_true):
         """Rumore -> filtro -> saturazione. Restituisce il campione grezzo (prima di ritardo e tara)."""
         raw = np.asarray(wrench_true, dtype=float) + self.rng.normal(0.0, self.noise_std)
@@ -81,4 +81,3 @@ class ATINanoSensor:
         self.offset = self.offset - self.drift * self.dt
         self.buf.append(self._acquire(wrench_true))
         return self.buf[0] - self.offset
-    

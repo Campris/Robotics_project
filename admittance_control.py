@@ -30,51 +30,51 @@ from ft_sensor import ATINanoSensor
 
 @dataclass
 class AdmittanceParams:
-    F_DES: float = 5.0
+    F_DES: float = 5.0             # forza di contatto desiderata [N]
 
-    K_FAR: float = 1500.0
-    K_NEAR: float = 300.0
-    D_FAR: float = 0.060
-    D_NEAR: float = 0.020
-    D_OFF: float = 0.000
-    F_GATE0: float = 0.5
-    F_GATE1: float = 2.0
+    K_FAR: float = 1500.0          # rigidezza virtuale lontano dalla pelle [N/m]
+    K_NEAR: float = 300.0          # rigidezza virtuale alla soglia D_NEAR [N/m]
+    D_FAR: float = 0.060           # [m] d >= D_FAR          -> K_d = K_FAR
+    D_NEAR: float = 0.020          # [m] D_NEAR <= d < D_FAR -> K_d scende da K_FAR a K_NEAR
+    D_OFF: float = 0.000           # [m] D_OFF <= d < D_NEAR  -> K_d scende da K_NEAR a 0; d <= D_OFF -> K_d = 0
+    F_GATE0: float = 0.5           # [N] soglia di forza sopra cui K_d inizia a spegnersi
+    F_GATE1: float = 2.0           # [N] soglia di forza sopra cui K_d e' spento del tutto
 
-    M_D: float = 0.05
-    KT_MODE: str = "k_eq"
-    B_INCLUDE_KD: bool = False
-    B_MIN: float = 1.0
+    M_D: float = 0.05              # massa virtuale [kg]
+    KT_MODE: str = "k_eq"          # "k_eq": rigidezza della mappa del tessuto | "tangent": pendenza al punto di lavoro
+    B_INCLUDE_KD: bool = False     # False: B_d = 2 sqrt(M K_t) (proposta) | True: 2 sqrt(M (K_t + K_d)) anche in avvicinamento
+    B_MIN: float = 1.0             # [Ns/m] limite inferiore di sicurezza
 
-    INTEGRATOR: str = "implicit"
+    INTEGRATOR: str = "implicit"   # "explicit" | "implicit" (Eulero esplicito o implicito sul termine di smorzamento)
 
-    V_CRUISE: float = 0.10
-    V_TOUCH: float = 0.02
-    V_CONTACT: float = 0.02
-    V_RETRACT: float = 0.10
+    V_CRUISE: float = 0.10         # velocita' massima di avvicinamento lontano dalla pelle [m/s]
+    V_TOUCH: float = 0.02          # velocita' massima di avvicinamento entro D_NEAR [m/s]
+    V_CONTACT: float = 0.02        # velocita' massima verso la pelle quando c'e' contatto [m/s]
+    V_RETRACT: float = 0.10        # velocita' massima di allontanamento [m/s]
 
     SCAN_ENABLE: bool = True
-    SCAN_PATTERN: str = "serpentine"
-    SCAN_X_RANGE: tuple = (-0.16, 0.16)
-    SCAN_Y_RANGE: tuple = (-0.11, 0.11)
-    SCAN_ROW_SPACING: float = 0.04
-    SCAN_START: tuple = (0.04, 0.06)
-    SCAN_END: tuple = (-0.08, 0.06)
-    SCAN_SPEED: float = 0.015
-    SCAN_DELAY: float = 2.0
-    F_CONTACT_OK: float = 1.0
+    SCAN_PATTERN: str = "serpentine"    # "line" mantiene il percorso singolo definito da SCAN_START/END
+    SCAN_X_RANGE: tuple = (-0.16, 0.16) # [m] limiti cranio-caudali, con margine dal bordo
+    SCAN_Y_RANGE: tuple = (-0.11, 0.11) # [m] limiti trasversali, con margine dal bordo
+    SCAN_ROW_SPACING: float = 0.04      # [m] distanza massima tra le passate
+    SCAN_START: tuple = (0.04, 0.06)    # [m] inizio della linea singola
+    SCAN_END: tuple = (-0.08, 0.06)     # [m] fine della linea singola
+    SCAN_SPEED: float = 0.015           # [m/s] velocita' MEDIA sul percorso, con profilo min-jerk per segmento
+    SCAN_DELAY: float = 2.0             # [s] attesa dopo il primo contatto prima di partire
+    F_CONTACT_OK: float = 1.0           # [N] il clock della traiettoria avanza solo se F_meas supera questa soglia
 
-    KP_POS_V: float = 4.0
-    KP_ROT_V: float = 4.0
-    V_TAN_MAX: float = 0.10
-    W_MAX: float = 0.5
+    KP_POS_V: float = 4.0          # [1/s] guadagno P posizione tangenziale -> velocita'
+    KP_ROT_V: float = 4.0          # [1/s] guadagno P orientamento -> velocita' angolare
+    V_TAN_MAX: float = 0.10        # [m/s]
+    W_MAX: float = 0.5             # [rad/s]
 
-    IK_DAMPING: float = 0.02
-    K_NULL_V: float = 1.0
-    QDOT_MAX: float = 1.0
-    Q_REF_MAX_ERR: float = 0.08
+    IK_DAMPING: float = 0.02       # smorzamento lambda della pseudo-inversa (adimensionale)
+    K_NULL_V: float = 1.0          # [1/s] richiamo alla postura nel nullspace
+    QDOT_MAX: float = 1.0          # [rad/s] limite sulla velocita' di ogni giunto
+    Q_REF_MAX_ERR: float = 0.08    # [rad] anti-windup: |q_ref - q| limitato
 
-    KP_JOINT: tuple = (600.0, 600.0, 600.0, 600.0, 250.0, 150.0, 50.0)
-    ZETA_JOINT: float = 1.0
+    KP_JOINT: tuple = (600.0, 600.0, 600.0, 600.0, 250.0, 150.0, 50.0)   # [Nm/rad] (valori Franka)
+    ZETA_JOINT: float = 1.0        # smorzamento relativo del PD di giunto (adimensionale)
 
 
 class StiffnessSchedule:
@@ -232,8 +232,8 @@ def differential_ik(J, v6, q, q_null, p: AdmittanceParams):
     return np.clip(q_dot, -p.QDOT_MAX, p.QDOT_MAX)
 
 
-HOVER = 0.06
-GOAL_DEPTH = 0.008
+HOVER = 0.06          # quota di partenza sopra la pelle a riposo [m]
+GOAL_DEPTH = 0.008    # profondita' dell'obiettivo del planner sotto la pelle a riposo [m]
 
 
 class AdmittanceSim:

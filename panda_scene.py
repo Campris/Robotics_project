@@ -16,15 +16,15 @@ import mujoco
 
 PANDA_DIR = Path(os.environ.get("PANDA_DIR", Path(__file__).resolve().parent / "franka_emika_panda"))
 
-NC, NR = 81, 61
-SX, SY = 0.20, 0.15
-ELEV, BASE = 0.25, 0.05
+NC, NR = 81, 61                 # punti della griglia del torso: colonne (x), righe (y)
+SX, SY = 0.20, 0.15             # semi-dimensioni patch [m]
+ELEV, BASE = 0.25, 0.05         # quota massima rappresentabile e spessore sotto lo zero [m]
 
-PANDA_BASE_POS = (-0.55, 0.0, 0.0)
-FLANGE_Z = 0.107
-TIP_Z = FLANGE_Z + 0.15
-PROBE_MASS = 0.30
-TIP_RADIUS = 0.022
+PANDA_BASE_POS = (-0.55, 0.0, 0.0)   # posizione della base del robot nel mondo [m]
+FLANGE_Z = 0.107                # flangia del Panda lungo l'asse z di link7: qui e' montato il sensore F/T [m]
+TIP_Z = FLANGE_Z + 0.15         # punta della sonda lungo l'asse z di link7 [m]
+PROBE_MASS = 0.30               # massa della sonda (porta-sonda incluso) [kg]
+TIP_RADIUS = 0.022              # raggio della sfera terminale [m]
 TORQUE_LIMITS = np.array([87, 87, 87, 87, 12, 12, 12], dtype=float)
 Q_HOVER = (-0.2060103872267039, -0.19019021558822838, -0.07189872951261951, -2.6899356513525126,
            -0.022682449347206736, 2.5000783113337017, -0.25844787553135584)
