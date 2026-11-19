@@ -69,7 +69,7 @@ from ft_sensor import ATINanoSensor
 class AdmittanceParams:
     # --- forza obiettivo --------------------------------------------------------------------------
     # COSA: forza di contatto desiderata lungo la normale della pelle [N].
-    # DOVE: BLOCCO 1 (F_des_eff = rho * F_DES), tissue_stiffness in modo "tangent", run_admittance (statistiche).
+    # DOVE: BLOCCO 1 (F_des_eff = rho * F_DES), run_admittance (statistiche).
     F_DES: float = 5.0             # forza di contatto desiderata [N]
 
     # --- BLOCCO 1: soglie di K_d (distanza d dalla pelle, in metri, positiva = sopra la pelle) ------
@@ -103,10 +103,6 @@ class AdmittanceParams:
     #         veloce, ma troppo piccola rende il sistema sensibile a rumore e ritardi.
     # DOVE: PureIntegratorAdmittance (BLOCCO 3) e critical_damping (BLOCCO 2).
     M_D: float = 0.05              # massa virtuale [kg]  (50 g: ammettenza molto reattiva)
-    # COSA: come scegliere K_t, la rigidezza del tessuto usata per lo smorzamento (vedi tissue_stiffness).
-    KT_MODE: str = "k_eq"          # "k_eq": K_t = k_eq(x,y) della tua mappa (come nella proposta)
-                                   # "tangent": pendenza dF/d(delta) del modello Hunt-Crossley al punto di lavoro F_DES
-                                   #            (circa 0.9 k_eq a 5 N: punto di lavoro sotto delta_ref, vedi tissue_stiffness)
     # COSA: se True somma K_d a K_t nello smorzamento. Default False: a contatto K_d = 0 e non cambia niente;
     #       cambia solo in avvicinamento.  DOVE: BLOCCO 2.
     B_INCLUDE_KD: bool = False     # False: B_d = 2 sqrt(M K_t) (proposta) | True: 2 sqrt(M (K_t + K_d)) anche in avvicinamento
@@ -251,31 +247,13 @@ class StiffnessSchedule:
 # =====================================================================================================
 #  BLOCCO 2: SMORZAMENTO CRITICO DEL TESSUTO
 # =====================================================================================================
-def tissue_stiffness(tissue, x, y, F_des, mode="k_eq"):
-    """
-    K_t [N/m] del tessuto nel punto (x, y).
-      "k_eq"    : valore della mappa (pendenza dF/d(delta) a delta_ref = 8 mm)
-      "tangent" : pendenza dF/d(delta) del modello Hunt-Crossley F = k d^n al punto di lavoro F = F_des.
-                  d* = (F_des / k)^(1/n)  ->  K_t = n * F_des / d*      (= k_eq * sqrt(d*/delta_ref): circa 0.9 k_eq a 5 N)
-    """
+def tissue_stiffness(tissue, x, y):
+    """K_t [N/m] del tessuto nel punto (x, y): il valore k_eq della tua mappa di rigidezza."""
     # COSA: tissue.stiff e' la StiffnessMap: chiamarla come funzione esegue il suo __call__(x, y) -> k_eq [N/m].
     #       Misurato lungo la serpentina: da 500 (addome) a 1629 N/m (torace con costole e sterno).
-    k_eq = float(tissue.stiff(x, y))
-    # COSA: modo di default: K_t = valore della mappa, e la funzione finisce qui.
-    if mode == "k_eq":
-        return k_eq
-    # COSA (modo "tangent"): esponente di Hertz n = 1.5.
-    n = tissue.n
-    # COSA: la stessa k di Hunt-Crossley usata in Tissue.contact: k = k_eq / (n * delta_ref^(n-1)),
-    #       scelta in modo che a delta = delta_ref (8 mm) la pendenza dF/d(delta) valga proprio k_eq.
-    k = k_eq / (n * tissue.delta_ref ** (n - 1.0))   # stessa k del tessuto (tissue.py, contact)
-    # COSA: penetrazione statica d* alla quale F = k d*^n = F_des: invertendo, d* = (F_des / k)^(1/n).
-    d_star = (F_des / k) ** (1.0 / n)
-    # COSA: pendenza al punto di lavoro: F = k d^n -> dF/dd = n k d^(n-1) = n F / d  ->  n F_des / d*.
-    #       Misurato: (0, 0) 1181 contro k_eq 1325 (0.89); addome (0.1, 0) 633 contro 520 (1.22): dove il tessuto
-    #       e' morbido d* supera 8 mm e la pendenza vera e' piu' alta di k_eq.
+    # PERCHÉ: k_eq e' la rigidezza che hai mappato e deciso tu: si usa direttamente, senza ricavarla da Hunt-Crossley.
     # DOVE: step() BLOCCO 2 -> critical_damping -> B_d; log "Kt".
-    return n * F_des / d_star
+    return float(tissue.stiff(x, y))
 
 
 def critical_damping(M_d, K, B_min=0.0):
@@ -656,7 +634,7 @@ class AdmittanceSim:
         # ---------------------------------------------------------------- BLOCCO 2: smorzamento critico
         # COSA: rigidezza del tessuto sotto la punta (pos[0] = x, pos[1] = y). Calcolata anche in aria: B_d vale gia'
         #       ~13.7 Ns/m durante la discesa (misurato).
-        K_t = tissue_stiffness(self.tissue, pos[0], pos[1], p.F_DES, p.KT_MODE)
+        K_t = tissue_stiffness(self.tissue, pos[0], pos[1])
         # COSA: B_d = max(2 sqrt(M_D (K_t + eventuale K_d)), B_MIN). "(K_d if cond else 0.0)" = espressione condizionale.
         # DOVE: adm.step (BLOCCO 3), log "Bd".
         B_d = critical_damping(p.M_D, K_t + (K_d if p.B_INCLUDE_KD else 0.0), p.B_MIN)
@@ -742,7 +720,8 @@ class AdmittanceSim:
         tau = self.kp_joint * (self.q_ref - q) + kd_joint * (q_dot_cmd - qd)
         # COSA: + qfrc_bias = compensazione di gravita' e Coriolis (stessa idea della tara): il PD deve occuparsi
         #       solo degli scostamenti. Taglio ai limiti del Franka e scrittura nei comandi dei motori (gear 1 ->
-        #       ctrl = coppia in Nm). Misurato: coppia massima 19-23 Nm.
+        #       ctrl = coppia in Nm). Misurato: coppia massima 19-24 Nm con la punta a x < -0.1 (partenza),
+        #       fino a 42.9 Nm a x ~ +0.15 (braccio piu' disteso: il grosso e' la gravita' di qfrc_bias).
         d.ctrl[:] = np.clip(tau + d.qfrc_bias[:m.nv], -ps.TORQUE_LIMITS, ps.TORQUE_LIMITS)
         # COSA: seconda meta' del passo: forze degli attuatori (ctrl) + forze esterne (xfrc_applied) -> accelerazioni,
         #       sensori force/torque, poi integrazione: qpos, qvel, time diventano quelli di t + dt.

@@ -15,7 +15,7 @@ Esegue il controllo di ammettenza (admittance_control.py) e produce grafici e CS
   python run_admittance.py --ati-cal SI-12-0.12 --ati-filter 152
 
   # controllore
-  python run_admittance.py --M 0.05 --fdes 5 --integrator implicit --kt-mode k_eq --events-seed 3
+  python run_admittance.py --M 0.05 --fdes 5 --integrator implicit --events-seed 3
   python run_admittance.py --kfar 1000 --knear 200 --dfar 0.08 --dnear 0.03 --doff 0.0
 
 Il CSV ha un campione ogni --csv-stride passi (default 1 = 1 kHz; con 170 s sono circa 30 MB: usa 10 per 100 Hz).
@@ -61,9 +61,9 @@ def make_params(a):
     p = AdmittanceParams()
     # COSA: coppie (nome dell'opzione, nome del campo). getattr(a, arg) legge l'opzione (es. a.fdes); se vale None
     #       l'utente non l'ha data e si tiene il default; altrimenti setattr(p, field, v) scrive p.F_DES = v.
-    # PERCHÉ: un solo ciclo invece di 13 "if" quasi uguali.
+    # PERCHÉ: un solo ciclo invece di 12 "if" quasi uguali.
     for arg, field in (("fdes", "F_DES"), ("M", "M_D"), ("kfar", "K_FAR"), ("knear", "K_NEAR"), ("dfar", "D_FAR"),
-                       ("dnear", "D_NEAR"), ("doff", "D_OFF"), ("integrator", "INTEGRATOR"), ("kt_mode", "KT_MODE"),
+                       ("dnear", "D_NEAR"), ("doff", "D_OFF"), ("integrator", "INTEGRATOR"),
                        ("scan_pattern", "SCAN_PATTERN"), ("row_spacing", "SCAN_ROW_SPACING"),
                        ("scan_speed", "SCAN_SPEED"), ("scan_delay", "SCAN_DELAY")):
         v = getattr(a, arg)
@@ -254,7 +254,7 @@ def analyse_and_plot(sim, a, outdir):
                          perdite_contatto_s=float(np.sum(L["fmeas"][win] < p.F_CONTACT_OK) / FS))
     # COSA: stampa intestazione e statistiche: i float con 3 decimali, il resto (la stringa "finestra") cosi' com'e'.
     #       {k:20s} = nome allineato su 20 caratteri. np.float64 conta come float per isinstance.
-    print(f"\n=== ammettenza | M_d {p.M_D} kg | F_des {p.F_DES} N | {p.INTEGRATOR} | K_t {p.KT_MODE} ===")
+    print(f"\n=== ammettenza | M_d {p.M_D} kg | F_des {p.F_DES} N | {p.INTEGRATOR} ===")
     for k, v in stats.items():
         print(f"  {k:20s} {v:.3f}" if isinstance(v, float) else f"  {k:20s} {v}")
 
@@ -299,7 +299,7 @@ def analyse_and_plot(sim, a, outdir):
         x.grid(alpha=0.3)
         x.axvspan(t_c + a.settle, t[-1], color="grey", alpha=0.05)
     # COSA: titolo generale con i parametri principali, poi salva e chiude.
-    fig.suptitle(f"Ammettenza a integratore puro: F_des = {p.F_DES:g} N, M_d = {p.M_D:g} kg, {p.INTEGRATOR}, K_t {p.KT_MODE}")
+    fig.suptitle(f"Ammettenza a integratore puro: F_des = {p.F_DES:g} N, M_d = {p.M_D:g} kg, {p.INTEGRATOR}")
     plt.tight_layout(); plt.savefig(outdir / "admittance_run.png", dpi=110); plt.close(fig)
 
     # ------------------------------------------------------------------ percorso e mappe sul torace
@@ -353,7 +353,7 @@ def analyse_and_plot(sim, a, outdir):
 # COSA: questo blocco gira solo se il file viene ESEGUITO (python run_admittance.py), non se viene importato.
 if __name__ == "__main__":
     # COSA: il lettore delle opzioni. Ogni add_argument dichiara un'opzione: nome, tipo, default, scelte valide.
-    #       argparse converte i trattini in trattini bassi: --kt-mode -> a.kt_mode, --events-seed -> a.events_seed.
+    #       argparse converte i trattini in trattini bassi: --events-seed -> a.events_seed.
     ap = argparse.ArgumentParser()
     # COSA: durata simulata; None = calcolata dopo (in fondo).
     ap.add_argument("--duration", type=float, default=None, help="default: automatica (discesa + attesa + percorso + 3 s)")
@@ -381,7 +381,6 @@ if __name__ == "__main__":
         ap.add_argument(f"--{name}", type=float, default=None)
     # COSA: scelte del controllore e della scansione (None = default di AdmittanceParams).
     ap.add_argument("--integrator", choices=("explicit", "implicit"), default=None)
-    ap.add_argument("--kt-mode", choices=("k_eq", "tangent"), default=None)
     ap.add_argument("--b-include-kd", action="store_true")
     ap.add_argument("--no-scan", action="store_true", help="niente traiettoria XY")
     ap.add_argument("--scan-pattern", choices=("serpentine", "line"), default=None)
