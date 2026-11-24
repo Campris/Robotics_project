@@ -282,11 +282,11 @@ class PureIntegratorAdmittance:
 
     Eulero esplicito :  v[k+1] = v[k] + dt/M * (F_net - B v[k])
     Eulero implicito :  v[k+1] = (M v[k] + dt F_net) / (M + dt B)     (incondizionatamente stabile in B)
-    Con dt = 1 ms e costante di tempo M/B ~ 20 ms i due schemi differiscono pochissimo.
+    Con dt = 1 ms e costante di tempo M/B = 2.8-4.9 ms (h = dt B/M = 0.2-0.36) entrambi gli schemi sono stabili.
     """
-    # NB (misurato): la docstring qui sopra e' vecchia: con M_D = 0.05 la costante M/B e' 2.8-4.9 ms (non 20).
-    # Ogni passo il fattore che moltiplica v vale 1 - dt*B/M ~ 0.73 (esplicito) contro 1/(1 + dt*B/M) ~ 0.79
-    # (implicito): entrambi stabili, ma non "uguali".
+    # NB (misurato): ogni passo il fattore che moltiplica v vale 1 - h ~ 0.73 (esplicito) contro 1/(1 + h) ~ 0.79
+    # (implicito) con B = 13.7: diversi, ma il risultato e' praticamente lo stesso (errore RMS 0.043 N in 30 s
+    # con entrambi).
 
     # COSA: memorizza massa virtuale, passo (1 ms) e schema; lo STATO dell'ammettenza e' solo self.v,
     #       che parte da 0 (robot fermo).
@@ -350,15 +350,24 @@ class LineTrajectory:
             rows = int(np.ceil((y_max - y_min) / p.SCAN_ROW_SPACING)) + 1
             # COSA: le 7 quote y equidistanti: -0.110, -0.073, -0.037, 0, 0.037, 0.073, 0.110.
             y_values = np.linspace(y_min, y_max, rows)
-            # COSA: list comprehension a doppio ciclo: per ogni riga (enumerate da' indice row e valore y) due
-            #       punti; righe pari da x_min a x_max, righe dispari da x_max a x_min (row % 2 = resto della
-            #       divisione per 2). Risultato: 14 waypoint a zig-zag, (-0.16,-0.11) (0.16,-0.11) (0.16,-0.073) ...
+            # COSA: costruisce la serpentina riga per riga: per ogni riga due punti, inizio e fine.
+            #       enumerate(y_values) da' l'indice della riga (row = 0, 1, ..., 6) e la sua quota y.
+            #       Risultato: 14 waypoint a zig-zag, (-0.16,-0.11) (0.16,-0.11) (0.16,-0.073) (-0.16,-0.073) ...
             # PERCHÉ: copre tutto il rettangolo senza "salti" in aria: si cambia riga con un segmento corto.
-            self.waypoints = np.array([
-                (x, y)
-                for row, y in enumerate(y_values)
-                for x in ((x_min, x_max) if row % 2 == 0 else (x_max, x_min))
-            ], dtype=float)
+            # DOVE: self.waypoints -> lunghezze e durate dei segmenti (qui sotto) e update() (posizione e velocita').
+            waypoints = []
+            for row, y in enumerate(y_values):
+                # COSA: row % 2 = resto della divisione per 2: 0 per le righe pari, 1 per le dispari.
+                #       Righe pari da sinistra a destra (x_min -> x_max), righe dispari al contrario.
+                # PERCHÉ: alternare il verso fa finire ogni riga dove inizia la successiva (zig-zag).
+                if row % 2 == 0:
+                    x_start, x_end = x_min, x_max
+                else:
+                    x_start, x_end = x_max, x_min
+                waypoints.append((x_start, y))      # inizio della riga
+                waypoints.append((x_end, y))        # fine della riga
+            # COSA: lista di 14 tuple -> array numpy 14 x 2 di float (colonna 0 = x, colonna 1 = y).
+            self.waypoints = np.array(waypoints, dtype=float)
         else:
             raise ValueError(f"SCAN_PATTERN non supportato: {p.SCAN_PATTERN}")
         # COSA: np.diff(..., axis=0) = differenze fra waypoint consecutivi (13 vettori); norm(..., axis=1) = la
