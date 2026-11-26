@@ -15,7 +15,7 @@ Esegue il controllo di ammettenza (admittance_control.py) e produce grafici e CS
   python run_admittance.py --ati-cal SI-12-0.12 --ati-filter 152
 
   # controllore
-  python run_admittance.py --M 0.05 --fdes 5 --integrator implicit --kt-mode k_eq --events-seed 3
+  python run_admittance.py --M 0.05 --fdes 5 --integrator implicit --events-seed 3
   python run_admittance.py --kfar 1000 --knear 200 --dfar 0.08 --dnear 0.03 --doff 0.0
 
 Il CSV ha un campione ogni --csv-stride passi (default 1 = 1 kHz; con 170 s sono circa 30 MB: usa 10 per 100 Hz).
@@ -37,7 +37,7 @@ FS = 1000
 def make_params(a):
     p = AdmittanceParams()
     for arg, field in (("fdes", "F_DES"), ("M", "M_D"), ("kfar", "K_FAR"), ("knear", "K_NEAR"), ("dfar", "D_FAR"),
-                       ("dnear", "D_NEAR"), ("doff", "D_OFF"), ("integrator", "INTEGRATOR"), ("kt_mode", "KT_MODE"),
+                       ("dnear", "D_NEAR"), ("doff", "D_OFF"), ("integrator", "INTEGRATOR"),
                        ("scan_pattern", "SCAN_PATTERN"), ("row_spacing", "SCAN_ROW_SPACING"),
                        ("scan_speed", "SCAN_SPEED"), ("scan_delay", "SCAN_DELAY")):
         v = getattr(a, arg)
@@ -153,7 +153,7 @@ def analyse_and_plot(sim, a, outdir):
                          scan_exy_medio_mm=1000 * L["exy"][scan].mean(), scan_exy_max_mm=1000 * L["exy"][scan].max(),
                          scan_completata_pct=100 * L["scan_s"][-1],
                          perdite_contatto_s=float(np.sum(L["fmeas"][win] < p.F_CONTACT_OK) / FS))
-    print(f"\n=== ammettenza | M_d {p.M_D} kg | F_des {p.F_DES} N | {p.INTEGRATOR} | K_t {p.KT_MODE} ===")
+    print(f"\n=== ammettenza | M_d {p.M_D} kg | F_des {p.F_DES} N | {p.INTEGRATOR} ===")
     for k, v in stats.items():
         print(f"  {k:20s} {v:.3f}" if isinstance(v, float) else f"  {k:20s} {v}")
 
@@ -183,7 +183,7 @@ def analyse_and_plot(sim, a, outdir):
     for x in ax:
         x.grid(alpha=0.3)
         x.axvspan(t_c + a.settle, t[-1], color="grey", alpha=0.05)
-    fig.suptitle(f"Ammettenza a integratore puro: F_des = {p.F_DES:g} N, M_d = {p.M_D:g} kg, {p.INTEGRATOR}, K_t {p.KT_MODE}")
+    fig.suptitle(f"Ammettenza a integratore puro: F_des = {p.F_DES:g} N, M_d = {p.M_D:g} kg, {p.INTEGRATOR}")
     plt.tight_layout(); plt.savefig(outdir / "admittance_run.png", dpi=110); plt.close(fig)
 
     sub = slice(None, None, 20)
@@ -232,7 +232,6 @@ if __name__ == "__main__":
     for name in ("fdes", "M", "kfar", "knear", "dfar", "dnear", "doff"):
         ap.add_argument(f"--{name}", type=float, default=None)
     ap.add_argument("--integrator", choices=("explicit", "implicit"), default=None)
-    ap.add_argument("--kt-mode", choices=("k_eq", "tangent"), default=None)
     ap.add_argument("--b-include-kd", action="store_true")
     ap.add_argument("--no-scan", action="store_true", help="niente traiettoria XY")
     ap.add_argument("--scan-pattern", choices=("serpentine", "line"), default=None)

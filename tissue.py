@@ -45,9 +45,9 @@ class TorsoGeometry:
 @dataclass
 class StiffnessMap:
     """
-    Rigidita' EQUIVALENTE k_eq(x, y) [N/m] alla profondita' di riferimento
-    (pendenza dF/d(delta) a delta_ref, rigidezza tangente). Torace (x < x_tr): piu' rigido, con costole
-    e sterno. Addome (x > x_tr): morbido. Tutto liscio, senza gradini.
+    Rigidita' k_eq(x, y) [N/m] del tessuto, mappata punto per punto: e' la K_t del controllore e, convertita
+    in k di Hunt-Crossley (pendenza dF/d(delta) = k_eq a delta_ref), la rigidita' del contatto. Torace (x < x_tr):
+    piu' rigido, con costole e sterno. Addome (x > x_tr): morbido. Tutto liscio, senza gradini.
     """
     k_abdomen: float = 500.0   # [N/m] addome
     k_chest: float = 900.0     # [N/m] torace

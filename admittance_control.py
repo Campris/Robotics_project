@@ -41,7 +41,6 @@ class AdmittanceParams:
     F_GATE1: float = 2.0           # [N] soglia di forza sopra cui K_d e' spento del tutto
 
     M_D: float = 0.05              # massa virtuale [kg]
-    KT_MODE: str = "k_eq"          # "k_eq": rigidezza della mappa del tessuto | "tangent": pendenza al punto di lavoro
     B_INCLUDE_KD: bool = False     # False: B_d = 2 sqrt(M K_t) (proposta) | True: 2 sqrt(M (K_t + K_d)) anche in avvicinamento
     B_MIN: float = 1.0             # [Ns/m] limite inferiore di sicurezza
 
@@ -120,20 +119,9 @@ class StiffnessSchedule:
         return p.V_TOUCH + (p.V_CRUISE - p.V_TOUCH) * self.s_a(d)
 
 
-def tissue_stiffness(tissue, x, y, F_des, mode="k_eq"):
-    """
-    K_t [N/m] del tessuto nel punto (x, y).
-      "k_eq"    : valore della mappa (pendenza dF/d(delta) a delta_ref = 8 mm)
-      "tangent" : pendenza dF/d(delta) del modello Hunt-Crossley F = k d^n al punto di lavoro F = F_des.
-                  d* = (F_des / k)^(1/n)  ->  K_t = n * F_des / d*      (= k_eq * sqrt(d*/delta_ref): circa 0.9 k_eq a 5 N)
-    """
-    k_eq = float(tissue.stiff(x, y))
-    if mode == "k_eq":
-        return k_eq
-    n = tissue.n
-    k = k_eq / (n * tissue.delta_ref ** (n - 1.0))
-    d_star = (F_des / k) ** (1.0 / n)
-    return n * F_des / d_star
+def tissue_stiffness(tissue, x, y):
+    """K_t [N/m] del tessuto nel punto (x, y): il valore k_eq della mappa di rigidezza."""
+    return float(tissue.stiff(x, y))
 
 
 def critical_damping(M_d, K, B_min=0.0):
@@ -150,7 +138,7 @@ class PureIntegratorAdmittance:
 
     Eulero esplicito :  v[k+1] = v[k] + dt/M * (F_net - B v[k])
     Eulero implicito :  v[k+1] = (M v[k] + dt F_net) / (M + dt B)     (incondizionatamente stabile in B)
-    Con dt = 1 ms e costante di tempo M_d/B_d di 3-5 ms entrambi gli schemi sono stabili.
+    Con dt = 1 ms e costante di tempo M/B = 2.8-4.9 ms (h = dt B/M = 0.2-0.36) entrambi gli schemi sono stabili.
     """
 
     def __init__(self, M_d, dt, integrator="implicit"):
@@ -189,11 +177,15 @@ class LineTrajectory:
                 raise ValueError("I limiti SCAN_X_RANGE e SCAN_Y_RANGE devono essere crescenti")
             rows = int(np.ceil((y_max - y_min) / p.SCAN_ROW_SPACING)) + 1
             y_values = np.linspace(y_min, y_max, rows)
-            self.waypoints = np.array([
-                (x, y)
-                for row, y in enumerate(y_values)
-                for x in ((x_min, x_max) if row % 2 == 0 else (x_max, x_min))
-            ], dtype=float)
+            waypoints = []
+            for row, y in enumerate(y_values):
+                if row % 2 == 0:
+                    x_start, x_end = x_min, x_max
+                else:
+                    x_start, x_end = x_max, x_min
+                waypoints.append((x_start, y))
+                waypoints.append((x_end, y))
+            self.waypoints = np.array(waypoints, dtype=float)
         else:
             raise ValueError(f"SCAN_PATTERN non supportato: {p.SCAN_PATTERN}")
         segment_lengths = np.linalg.norm(np.diff(self.waypoints, axis=0), axis=1)
@@ -318,7 +310,7 @@ class AdmittanceSim:
         # costante K_hat, come sul robot reale: B_nom = 2 sqrt(M_d K_hat) si calcola una volta sola e l'agente
         # SAC lo modula di +-20 % per compensare l'errore della stima; lo stesso agente somma una forza
         # correttiva all'ingresso dell'ammettenza (con saturazione sulla somma delle forze).
-        K_t = tissue_stiffness(self.tissue, pos[0], pos[1], p.F_DES, p.KT_MODE)
+        K_t = tissue_stiffness(self.tissue, pos[0], pos[1])
         B_d = critical_damping(p.M_D, K_t + (K_d if p.B_INCLUDE_KD else 0.0), p.B_MIN)
 
         goal = self.target(t)
